@@ -23,6 +23,11 @@
             tf2           # tf2 core
             tf2-geometry-msgs  # tf2 msg conversions
             ament-cmake-core
+            # --- CLI Debugging Tools ---
+            # (rqt suite removed temporarily due to pyqt5/Python 3.13 patch conflicts)
+            ros2bag               # Command line tool for recording/playing data
+            rosbag2-storage-default-plugins # SQLite3 storage backend for rosbag
+            tf2-tools             # CLI tools like tf2_echo and tf2_monitor
           ];
         };
         python = pkgs.python3.withPackages (ps: [ ps.numpy ]);
@@ -51,6 +56,7 @@
             alias ci="colcon build --packages-up-to seesaw_ros2 --symlink-install"
             alias test="ros2 run seesaw_ros2 udp_reader & sleep 2 && rviz2"
             echo "=== Seesaw ROS2 C++ Ready ==="
+            echo "- Debugging tools active: ros2 bag, tf2_tools, rviz2"
             echo "- mkdir -p seesaw_ros2/src"
             echo "- cd seesaw_ros2"
             echo "- cb  # or ci for symlink-install"

@@ -32,14 +32,14 @@ public:
   UDPReader() : Node("udp_reader") {
     // REPLACE these 3 lines:
     rclcpp::QoS sensor_qos = rclcpp::SensorDataQoS();  // BEST_EFFORT, KEEP_LAST(5)
-    lidar_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/scan", sensor_qos);
-    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu", sensor_qos);
+    lidar_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/scan", rclcpp::SensorDataQoS());
+    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu", rclcpp::SensorDataQoS());
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", sensor_qos);
     setup_sockets();
     recv_thread_ = std::thread(&UDPReader::recv_loop, this);
     
-    scan_timer_ = create_wall_timer(std::chrono::milliseconds(20), 
-      std::bind(&UDPReader::publish_scan, this));
+    scan_timer_ = create_wall_timer(
+      std::chrono::milliseconds(120), std::bind(&UDPReader::publish_scan, this));
     imuodom_timer_ = create_wall_timer(std::chrono::milliseconds(5), 
       std::bind(&UDPReader::publish_imuodom, this));
     
@@ -121,7 +121,7 @@ private:
       // LIDAR socket (dest 12345) ← ESP32 src 8888
       if (lidar_sock_ >= 0 && FD_ISSET(lidar_sock_, &fds)) {
         ssize_t len = recvfrom(lidar_sock_, buf, sizeof(buf), 0, (sockaddr*)&sender, &addrlen);
-        if (len > 0 && ntohs(sender.sin_port) == 8888) {  // ESP32 UDP_LOCAL_PORT_LIDAR
+        if (len > 0) {  // ESP32 UDP_LOCAL_PORT_LIDAR
           parse_lidar(buf, len);
           lidar_packets_++;
         }
@@ -130,7 +130,7 @@ private:
       // IMU socket (dest 12346) ← ESP32 src 8889
       if (imu_sock_ >= 0 && FD_ISSET(imu_sock_, &fds)) {
         ssize_t len = recvfrom(imu_sock_, buf, sizeof(buf), 0, (sockaddr*)&sender, &addrlen);
-        if (len > 0 && ntohs(sender.sin_port) == 8889) {  // ESP32 UDP_LOCAL_PORT_IMU
+        if (len > 0) {  // ESP32 UDP_LOCAL_PORT_IMU
           parse_imu(buf, len);
           imu_packets_++;
         }
@@ -146,66 +146,59 @@ private:
   void parse_imu(const char* data, ssize_t len) {
     if (len != 28) return;
     
-    uint32_t ts_be;
-    std::memcpy(&ts_be, data, 4);
-    uint32_t ts_ms = __builtin_bswap32(ts_be);
+    uint32_t ts_ms;
+    std::memcpy(&ts_ms, data, 4);  // LITTLE ENDIAN - NO SWAP
     
     float vals[6];
     std::memcpy(vals, data + 4, 24);
-    for (auto& v : vals) {
-      uint32_t bits;
-      std::memcpy(&bits, &v, sizeof(bits));
-      bits = __builtin_bswap32(bits);
-      std::memcpy(&v, &bits, sizeof(v));
-    }
+    // NO BYTE SWAP - ESP32 sends native little-endian floats
     
     std::lock_guard<std::mutex> lock(imu_mutex_);
     latest_imu_ts_ = ts_ms / 1000.0;
     latest_accel_ = {vals[0], vals[1], vals[2]};
     latest_gyro_ = {vals[3], vals[4], vals[5]};
     imu_data_valid_ = true;
-    imu_count_++;
-    RCLCPP_DEBUG(get_logger(), "parse_imu: len=%zd ts=%.1f accel_z=%.2f gyro_z=%.2f", 
-             len, latest_imu_ts_, latest_gyro_[2], latest_accel_[2]);
-    
-    if (imu_count_ % 1000 == 0) {
-      RCLCPP_INFO(get_logger(), "IMU #%zu: Z=%.3f/%.3f", imu_count_, vals[2], vals[5]);
-    }
   }
-  
+
   void parse_lidar(const char* data, ssize_t len) {
     if (len < 20 || len % 20 != 0) return;
     
     int npoints = len / 20;
     std::lock_guard<std::mutex> lock(scans_mutex_);
     
+    size_t valid_points_this_packet = 0;
+    
     for (int i = 0; i < npoints; i++) {
       const char* pkt = data + i * 20;
       uint32_t raw_phi, raw_angle, raw_dist;
+      
       std::memcpy(&raw_phi, pkt + 4, 4);
       std::memcpy(&raw_angle, pkt + 8, 4);
       std::memcpy(&raw_dist, pkt + 12, 4);
-      uint8_t qual = pkt[16];
-      
-      if (qual < 10) continue;
-      
-      raw_phi = __builtin_bswap32(raw_phi);
-      raw_angle = __builtin_bswap32(raw_angle);
-      raw_dist = __builtin_bswap32(raw_dist);
       
       float phi = raw_phi / 100.0f;
       float angle = raw_angle / 100.0f;
       float dist = raw_dist / 1000.0f;
       
-      if (dist > 0.01f) {
+      if (dist > 0.01f && dist < 12.0f) {  // Valid range
         float abs_angle = fmodf(phi + angle, 360.0f);
-        int bucket = static_cast<int>(abs_angle * 10) % 3600;
-        if (dist < scans_[bucket]) scans_[bucket] = dist;
-        points_since_reset_++;
+        int bucket = static_cast<int>(abs_angle * 10.0f) % 3600;
+        
+        // ✅ COUNT ALL VALID POINTS, update min distance
+        scans_[bucket] = std::min(scans_[bucket], dist);
+        valid_points_this_packet++;
+        points_since_reset_++;  // ← CRITICAL: COUNT EVERY VALID POINT
       }
     }
+    
+    if (valid_points_this_packet > 0) {
+      RCLCPP_INFO(get_logger(), "LIDAR: %d raw → %zu valid pts (total=%zu)", 
+                  npoints, valid_points_this_packet, points_since_reset_);
+    }
   }
-  
+
+
+    
   geometry_msgs::msg::Quaternion quat_from_yaw(double yaw) {
     tf2::Quaternion q;
     q.setRPY(0, 0, yaw);
@@ -216,9 +209,23 @@ private:
   }
   
   void publish_scan() {
-    std::lock_guard<std::mutex> lock(scans_mutex_);
-    if (points_since_reset_ < 100) return;
+    std::array<float, 3601> temp_scans;
+    size_t temp_points;
     
+    {
+      std::lock_guard<std::mutex> lock(scans_mutex_);
+      if (points_since_reset_ < 50) {  // Lowered threshold
+        RCLCPP_DEBUG(get_logger(), "Skipping scan: only %zu points", points_since_reset_);
+        return;
+      }
+      
+      temp_scans = scans_;           // Copy current scan
+      temp_points = points_since_reset_;
+      scans_.fill(INFINITY);         // Clear for NEXT scan
+      points_since_reset_ = 0;
+    }
+    
+    // Publish OUTSIDE lock
     auto msg = sensor_msgs::msg::LaserScan();
     msg.header.stamp = this->get_clock()->now();
     msg.header.frame_id = "lidar_link";
@@ -227,12 +234,12 @@ private:
     msg.angle_increment = 2 * M_PI / 3600;
     msg.range_min = 0.01;
     msg.range_max = 12.0;
-    msg.ranges.assign(scans_.begin(), scans_.end());
+    msg.ranges = {temp_scans.begin(), temp_scans.end()};
     
     lidar_pub_->publish(msg);
-    scans_.fill(INFINITY);
-    points_since_reset_ = 0;
+    RCLCPP_INFO(get_logger(), "SCAN Published %zu points", temp_points);
   }
+
   
   void publish_imuodom() {
     Eigen::Vector3f accel, gyro;
@@ -251,7 +258,6 @@ private:
     yaw_ += gyro.z() * dt;
     
     auto q = quat_from_yaw(yaw_);
-    const double g = 9.81;
     
     // IMU msg
     auto imu = sensor_msgs::msg::Imu();
@@ -260,9 +266,9 @@ private:
     imu.orientation = q;
     std::fill(imu.orientation_covariance.begin(), imu.orientation_covariance.begin() + 9, 0.01);
     
-    imu.linear_acceleration.x = accel.x() * g;
-    imu.linear_acceleration.y = accel.y() * g;
-    imu.linear_acceleration.z = accel.z() * g;
+    imu.linear_acceleration.x = accel.x();
+    imu.linear_acceleration.y = accel.y();
+    imu.linear_acceleration.z = accel.z();
     std::fill(imu.linear_acceleration_covariance.begin(), imu.linear_acceleration_covariance.begin() + 9, 0.1);
     
     imu.angular_velocity.x = gyro.x();
@@ -272,18 +278,18 @@ private:
     
     imu_pub_->publish(imu);
     
-    // Odom msg
-    auto odom = nav_msgs::msg::Odometry();
-    odom.header.stamp = now;
-    odom.header.frame_id = "odom";
-    odom.child_frame_id = "base_link";
-    odom.pose.pose.orientation = q;
+    // // Odom msg
+    // auto odom = nav_msgs::msg::Odometry();
+    // odom.header.stamp = now;
+    // odom.header.frame_id = "odom";
+    // odom.child_frame_id = "base_link";
+    // odom.pose.pose.orientation = q;
     
-    odom.twist.twist.linear.x = accel.x() * g;
-    odom.twist.twist.linear.y = accel.y() * g;
-    odom.twist.twist.angular.z = gyro.z();
+    // odom.twist.twist.linear.x = accel.x();
+    // odom.twist.twist.linear.y = accel.y();
+    // odom.twist.twist.angular.z = gyro.z();
     
-    odom_pub_->publish(odom);
+    // odom_pub_->publish(odom);
   }
   
   // Publishers

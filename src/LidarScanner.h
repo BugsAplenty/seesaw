@@ -34,6 +34,12 @@ public:
                                   uint8_t  newRotFlag,
                                   int8_t   quality) {
       (void)ptr; (void)newRotFlag;
+      // static int raw_count = 0;
+      // raw_count++;
+      // if (raw_count % 100 == 0) {
+      //   Serial.printf("[LIDAR RAW] dist=%d angle=%.1f qual=%d\n", 
+      //                 dist, angle_q6 / 64.0f, quality);
+      // }
       if (dist > 0) {
         processLidarPoint((float)dist, angle_q6 / 64.0f, (byte)quality);
       }
