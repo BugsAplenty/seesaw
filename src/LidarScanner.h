@@ -20,7 +20,7 @@ public:
     digitalWrite(LIDAR_MOTOR_PIN, HIGH);
     Serial.println("[LIDAR] motor pin HIGH, spinning up...");
     delay(LIDAR_SPINUP_MS);
-
+    Serial2.setRxBufferSize(2048);
     Serial.printf("[LIDAR] Serial2 init on RX=%d TX=%d @115200\n", LIDAR_RX_PIN, LIDAR_TX_PIN);
     lidar.init(LIDAR_RX_PIN, LIDAR_TX_PIN);
 

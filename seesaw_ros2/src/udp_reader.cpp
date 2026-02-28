@@ -1,49 +1,42 @@
-// src/udp_reader.cpp - COMPLETE DROP-IN for your ESP32 Config.h ports
-// PC binds: 12345(lidar)/12346(imu)  Filters ESP32 src:8888(lidar)/8889(imu)
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <sensor_msgs/msg/imu.hpp>
 #include <nav_msgs/msg/odometry.hpp>
-#include <geometry_msgs/msg/quaternion.hpp>
-#include <geometry_msgs/msg/pose_with_covariance.hpp>
-#include <geometry_msgs/msg/twist_with_covariance.hpp>
-#include <geometry_msgs/msg/vector3.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
 #include <tf2/LinearMath/Quaternion.h>
+#include <tf2_ros/transform_broadcaster.h>
 #include <Eigen/Core>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <errno.h>
 #include <cstring>
 #include <vector>
 #include <array>
 #include <thread>
 #include <atomic>
 #include <mutex>
-#include <chrono>
-#include <cmath>
-#include <rclcpp/qos.hpp>  // Add this include
 
 class UDPReader : public rclcpp::Node {
 public:
   UDPReader() : Node("udp_reader") {
-    // REPLACE these 3 lines:
-    rclcpp::QoS sensor_qos = rclcpp::SensorDataQoS();  // BEST_EFFORT, KEEP_LAST(5)
-    lidar_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/scan", rclcpp::SensorDataQoS());
-    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu", rclcpp::SensorDataQoS());
-    odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", sensor_qos);
+    rclcpp::QoS sensor_qos = rclcpp::SensorDataQoS();
+    lidar_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/scan", sensor_qos);
+    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu", sensor_qos);
+    odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
+    
+    // Init Broadcaster to prevent Exit Code -11
+    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    
     setup_sockets();
     recv_thread_ = std::thread(&UDPReader::recv_loop, this);
     
-    scan_timer_ = create_wall_timer(
-      std::chrono::milliseconds(120), std::bind(&UDPReader::publish_scan, this));
+    // Only timer is IMU. Lidar publishes itself automatically on zero-crossing.
     imuodom_timer_ = create_wall_timer(std::chrono::milliseconds(5), 
       std::bind(&UDPReader::publish_imuodom, this));
     
-    RCLCPP_INFO(get_logger(), "🚀 UDPReader: bind 12345(lidar)/12346(imu) ← ESP32 src 8888/8889");
+    RCLCPP_INFO(get_logger(), "🚀 UDPReader started.");
   }
   
   ~UDPReader() {
@@ -55,274 +48,209 @@ public:
   
 private:
   void setup_sockets() {
-    int reuse = 1;
-    int bufsize = 2*1024*1024;
-    struct timeval tv = {0, 10000};
+    int reuse = 1; int bufsize = 2*1024*1024; struct timeval tv = {0, 10000};
     
-    // LIDAR: bind ESP32 UDP_REMOTE_PORT_LIDAR = 12345
     lidar_sock_ = socket(AF_INET, SOCK_DGRAM, 0);
     setsockopt(lidar_sock_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     setsockopt(lidar_sock_, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(lidar_sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    sockaddr_in lidar_addr{}; lidar_addr.sin_family = AF_INET; lidar_addr.sin_addr.s_addr = INADDR_ANY; lidar_addr.sin_port = htons(12345);
+    bind(lidar_sock_, (sockaddr*)&lidar_addr, sizeof(lidar_addr));
     
-    sockaddr_in lidar_addr{};
-    lidar_addr.sin_family = AF_INET;
-    lidar_addr.sin_addr.s_addr = INADDR_ANY;
-    lidar_addr.sin_port = htons(12345);  // ← ESP32 UDP_REMOTE_PORT_LIDAR
-    if (bind(lidar_sock_, (sockaddr*)&lidar_addr, sizeof(lidar_addr)) == 0) {
-      RCLCPP_INFO(get_logger(), "✅ LIDAR bound port 12345 (ESP32 dest)");
-    } else {
-      RCLCPP_FATAL(get_logger(), "LIDAR bind 12345 failed: %s", strerror(errno));
-      rclcpp::shutdown();
-    }
-    
-    // IMU: bind ESP32 UDP_REMOTE_PORT_IMU = 12346
     imu_sock_ = socket(AF_INET, SOCK_DGRAM, 0);
     setsockopt(imu_sock_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
     setsockopt(imu_sock_, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
     setsockopt(imu_sock_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    
-    sockaddr_in imu_addr{};
-    imu_addr.sin_family = AF_INET;
-    imu_addr.sin_addr.s_addr = INADDR_ANY;
-    imu_addr.sin_port = htons(12346);  // ← ESP32 UDP_REMOTE_PORT_IMU
-    if (bind(imu_sock_, (sockaddr*)&imu_addr, sizeof(imu_addr)) == 0) {
-      RCLCPP_INFO(get_logger(), "✅ IMU bound port 12346 (ESP32 dest)");
-    } else {
-      RCLCPP_FATAL(get_logger(), "IMU bind 12346 failed: %s", strerror(errno));
-      rclcpp::shutdown();
-    }
+    sockaddr_in imu_addr{}; imu_addr.sin_family = AF_INET; imu_addr.sin_addr.s_addr = INADDR_ANY; imu_addr.sin_port = htons(12346);
+    bind(imu_sock_, (sockaddr*)&imu_addr, sizeof(imu_addr));
   }
   
   void recv_loop() {
-    char buf[1500];
-    sockaddr_in sender;
-    socklen_t addrlen = sizeof(sender);
-    
+    char buf[1500]; sockaddr_in sender; socklen_t addrlen = sizeof(sender);
     while (running_) {
-      fd_set fds;
-      FD_ZERO(&fds);
+      fd_set fds; FD_ZERO(&fds);
       if (lidar_sock_ >= 0) FD_SET(lidar_sock_, &fds);
       if (imu_sock_ >= 0) FD_SET(imu_sock_, &fds);
       
-      int max_fd = 0;
-      if (lidar_sock_ >= 0) max_fd = std::max(max_fd, lidar_sock_);
-      if (imu_sock_ >= 0) max_fd = std::max(max_fd, imu_sock_);
-      max_fd++;
+      int max_fd = std::max(lidar_sock_, imu_sock_) + 1;
+      struct timeval tv = {0, 5000};
+      if (select(max_fd, &fds, NULL, NULL, &tv) <= 0) continue;
       
-      struct timeval tv = {0, 5000};  // 5ms poll
-      int activity = select(max_fd, &fds, NULL, NULL, &tv);
-      
-      if (activity < 0 && errno != EINTR) {
-        RCLCPP_ERROR(get_logger(), "select: %s", strerror(errno));
-        continue;
-      }
-      
-      // LIDAR socket (dest 12345) ← ESP32 src 8888
-      if (lidar_sock_ >= 0 && FD_ISSET(lidar_sock_, &fds)) {
+      if (FD_ISSET(lidar_sock_, &fds)) {
         ssize_t len = recvfrom(lidar_sock_, buf, sizeof(buf), 0, (sockaddr*)&sender, &addrlen);
-        if (len > 0) {  // ESP32 UDP_LOCAL_PORT_LIDAR
-          parse_lidar(buf, len);
-          lidar_packets_++;
-        }
+        if (len > 0) parse_lidar(buf, len);
       }
-      
-      // IMU socket (dest 12346) ← ESP32 src 8889
-      if (imu_sock_ >= 0 && FD_ISSET(imu_sock_, &fds)) {
+      if (FD_ISSET(imu_sock_, &fds)) {
         ssize_t len = recvfrom(imu_sock_, buf, sizeof(buf), 0, (sockaddr*)&sender, &addrlen);
-        if (len > 0) {  // ESP32 UDP_LOCAL_PORT_IMU
-          parse_imu(buf, len);
-          imu_packets_++;
-        }
+        if (len > 0) parse_imu(buf, len);
       }
-      
-      // Stats
-      // if ((lidar_packets_ + imu_packets_) % 1000 == 0) {
-      //   RCLCPP_INFO(get_logger(), "Pkts: lidar=%zu imu=%zu", lidar_packets_, imu_packets_);
-      // }
     }
   }
   
   void parse_imu(const char* data, ssize_t len) {
     if (len != 28) return;
+    uint32_t ts_ms; std::memcpy(&ts_ms, data, 4);
+    float vals[6]; std::memcpy(vals, data + 4, 24);
     
-    uint32_t ts_ms;
-    std::memcpy(&ts_ms, data, 4);  // LITTLE ENDIAN - NO SWAP
-    
-    float vals[6];
-    std::memcpy(vals, data + 4, 24);
-    // NO BYTE SWAP - ESP32 sends native little-endian floats
-    
+    Eigen::Vector3f raw_accel{vals[0], vals[1], vals[2]};
+    Eigen::Vector3f raw_gyro{vals[3], vals[4], vals[5]};
+
+    // Auto Calibrate on boot
+    if (!imu_calibrated_) {
+      gyro_bias_ += raw_gyro;
+      calib_samples_++;
+      if (calib_samples_ == 1) RCLCPP_INFO(get_logger(), "IMU Calibrating: DO NOT MOVE ROBOT...");
+      if (calib_samples_ >= 200) {
+        gyro_bias_ /= 200.0f;
+        imu_calibrated_ = true;
+        RCLCPP_INFO(get_logger(), "✅ IMU Calibrated! Gyro Bias subtracted.");
+      }
+      return; 
+    }
+    raw_gyro -= gyro_bias_;
+
     std::lock_guard<std::mutex> lock(imu_mutex_);
     latest_imu_ts_ = ts_ms / 1000.0;
-    latest_accel_ = {vals[0], vals[1], vals[2]};
-    latest_gyro_ = {vals[3], vals[4], vals[5]};
+    latest_accel_ = raw_accel;
+    latest_gyro_ = raw_gyro;
     imu_data_valid_ = true;
   }
 
   void parse_lidar(const char* data, ssize_t len) {
     if (len < 20 || len % 20 != 0) return;
-    
     int npoints = len / 20;
-    std::lock_guard<std::mutex> lock(scans_mutex_);
+    bool sweep_complete = false;
     
-    size_t valid_points_this_packet = 0;
-    
-    for (int i = 0; i < npoints; i++) {
-      const char* pkt = data + i * 20;
-      uint32_t raw_phi, raw_angle, raw_dist;
-      
-      std::memcpy(&raw_phi, pkt + 4, 4);
-      std::memcpy(&raw_angle, pkt + 8, 4);
-      std::memcpy(&raw_dist, pkt + 12, 4);
-      
-      float phi = raw_phi / 100.0f;
-      float angle = raw_angle / 100.0f;
-      float dist = raw_dist / 1000.0f;
-      
-      if (dist > 0.01f && dist < 12.0f) {  // Valid range
-        float abs_angle = fmodf(phi + angle, 360.0f);
-        int bucket = static_cast<int>(abs_angle * 10.0f) % 3600;
+    {
+      std::lock_guard<std::mutex> lock(scans_mutex_);
+      for (int i = 0; i < npoints; i++) {
+        const char* pkt = data + i * 20;
+        int32_t raw_phi, raw_angle, raw_dist;
         
-        // ✅ COUNT ALL VALID POINTS, update min distance
-        scans_[bucket] = std::min(scans_[bucket], dist);
-        valid_points_this_packet++;
-        points_since_reset_++;  // ← CRITICAL: COUNT EVERY VALID POINT
+        std::memcpy(&raw_phi, pkt + 4, 4);
+        std::memcpy(&raw_angle, pkt + 8, 4);
+        std::memcpy(&raw_dist, pkt + 12, 4);
+        
+        float phi = raw_phi / 100.0f;
+        float angle = raw_angle / 100.0f;
+        float dist = raw_dist / 1000.0f;
+        
+        if (dist > 0.01f && dist < 12.0f) {
+          float abs_angle = fmodf(phi + angle, 360.0f);
+          if (abs_angle < 0) abs_angle += 360.0f;
+          
+          if (abs_angle < 90.0f && last_angle_ > 270.0f) sweep_complete = true;
+          last_angle_ = abs_angle;
+
+          int bucket = static_cast<int>(abs_angle * 10.0f) % 3600;
+          scans_[bucket] = std::min(scans_[bucket], dist);
+          points_since_reset_++;
+        }
       }
     }
     
-    // if (valid_points_this_packet > 0) {
-    //   RCLCPP_INFO(get_logger(), "LIDAR: %d raw → %zu valid pts (total=%zu)", 
-    //               npoints, valid_points_this_packet, points_since_reset_);
-    // }
+    if (sweep_complete) publish_scan_sync();
   }
 
-
-    
-  geometry_msgs::msg::Quaternion quat_from_yaw(double yaw) {
-    tf2::Quaternion q;
-    q.setRPY(0, 0, yaw);
-    geometry_msgs::msg::Quaternion msg;
-    q.normalize();
-    msg.x = q.x(); msg.y = q.y(); msg.z = q.z(); msg.w = q.w();
-    return msg;
-  }
-  
-  void publish_scan() {
+  void publish_scan_sync() {
     std::array<float, 3601> temp_scans;
     size_t temp_points;
     
     {
       std::lock_guard<std::mutex> lock(scans_mutex_);
-      if (points_since_reset_ < 50) {  // Lowered threshold
-        RCLCPP_DEBUG(get_logger(), "Skipping scan: only %zu points", points_since_reset_);
-        return;
-      }
-      
-      temp_scans = scans_;           // Copy current scan
+      if (points_since_reset_ < 50) return;
+      temp_scans = scans_;
       temp_points = points_since_reset_;
-      scans_.fill(INFINITY);         // Clear for NEXT scan
+      scans_.fill(INFINITY);
       points_since_reset_ = 0;
     }
     
-    // Publish OUTSIDE lock
     auto msg = sensor_msgs::msg::LaserScan();
     msg.header.stamp = this->get_clock()->now();
     msg.header.frame_id = "lidar_link";
     msg.angle_min = 0;
     msg.angle_max = 2 * M_PI;
     msg.angle_increment = 2 * M_PI / 3600;
+    msg.time_increment = 0.1 / 3600.0;
+    msg.scan_time = 0.1;
     msg.range_min = 0.01;
     msg.range_max = 12.0;
     msg.ranges = {temp_scans.begin(), temp_scans.end()};
     
     lidar_pub_->publish(msg);
-    RCLCPP_INFO(get_logger(), "SCAN Published %zu points", temp_points);
   }
 
-  
   void publish_imuodom() {
     Eigen::Vector3f accel, gyro;
     double ts;
     {
       std::lock_guard<std::mutex> lock(imu_mutex_);
       if (!imu_data_valid_) return;
-      ts = latest_imu_ts_;
-      accel = latest_accel_;
-      gyro = latest_gyro_;
+      ts = latest_imu_ts_; accel = latest_accel_; gyro = latest_gyro_;
     }
     
     auto now = this->get_clock()->now();
     double dt = (prev_imu_ts_ > 0) ? (ts - prev_imu_ts_) : 0.005;
     prev_imu_ts_ = ts;
+    
+    roll_ += gyro.x() * dt;
+    pitch_ += gyro.y() * dt;
     yaw_ += gyro.z() * dt;
     
-    auto q = quat_from_yaw(yaw_);
+    tf2::Quaternion q;
+    q.setRPY(roll_, pitch_, yaw_);
+    q.normalize();
     
-    // IMU msg
+    // Broadcast Dynamic TF
+    geometry_msgs::msg::TransformStamped t;
+    t.header.stamp = now;
+    t.header.frame_id = "odom";
+    t.child_frame_id = "base_link";
+    t.transform.translation.x = 0.0; t.transform.translation.y = 0.0; t.transform.translation.z = 0.0;
+    t.transform.rotation.x = q.x(); t.transform.rotation.y = q.y();
+    t.transform.rotation.z = q.z(); t.transform.rotation.w = q.w();
+    tf_broadcaster_->sendTransform(t);
+    
+    // Publish IMU
     auto imu = sensor_msgs::msg::Imu();
     imu.header.stamp = now;
     imu.header.frame_id = "imu_link";
-    imu.orientation = q;
-    std::fill(imu.orientation_covariance.begin(), imu.orientation_covariance.begin() + 9, 0.01);
-    
-    imu.linear_acceleration.x = accel.x();
-    imu.linear_acceleration.y = accel.y();
-    imu.linear_acceleration.z = accel.z();
-    std::fill(imu.linear_acceleration_covariance.begin(), imu.linear_acceleration_covariance.begin() + 9, 0.1);
-    
-    imu.angular_velocity.x = gyro.x();
-    imu.angular_velocity.y = gyro.y();
-    imu.angular_velocity.z = gyro.z();
-    std::fill(imu.angular_velocity_covariance.begin(), imu.angular_velocity_covariance.begin() + 9, 0.01);
-    
+    imu.orientation.x = q.x(); imu.orientation.y = q.y();
+    imu.orientation.z = q.z(); imu.orientation.w = q.w();
+    imu.angular_velocity.x = gyro.x(); imu.angular_velocity.y = gyro.y(); imu.angular_velocity.z = gyro.z();
     imu_pub_->publish(imu);
-    
-    // // Odom msg
-    // auto odom = nav_msgs::msg::Odometry();
-    // odom.header.stamp = now;
-    // odom.header.frame_id = "odom";
-    // odom.child_frame_id = "base_link";
-    // odom.pose.pose.orientation = q;
-    
-    // odom.twist.twist.linear.x = accel.x();
-    // odom.twist.twist.linear.y = accel.y();
-    // odom.twist.twist.angular.z = gyro.z();
-    
-    // odom_pub_->publish(odom);
   }
-  
-  // Publishers
+
   rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr lidar_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   
-  // Sockets
+  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   int lidar_sock_ = -1, imu_sock_ = -1;
   std::thread recv_thread_;
   std::atomic<bool> running_{true};
   
-  // Timers
-  rclcpp::TimerBase::SharedPtr scan_timer_, imuodom_timer_;
+  rclcpp::TimerBase::SharedPtr imuodom_timer_;
   
-  // Lidar
   std::array<float, 3601> scans_{INFINITY};
   std::mutex scans_mutex_;
   size_t points_since_reset_ = 0;
-  size_t lidar_packets_ = 0;
+  float last_angle_ = 0.0f;
   
-  // IMU
   std::mutex imu_mutex_;
-  double latest_imu_ts_ = 0, prev_imu_ts_ = 0, yaw_ = 0;
+  double latest_imu_ts_ = 0, prev_imu_ts_ = 0;
   Eigen::Vector3f latest_accel_, latest_gyro_;
   std::atomic<bool> imu_data_valid_{false};
-  uint64_t imu_count_ = 0, imu_packets_ = 0;
+  
+  bool imu_calibrated_ = false;
+  int calib_samples_ = 0;
+  Eigen::Vector3f gyro_bias_{0, 0, 0};
+  double roll_ = 0.0, pitch_ = 0.0, yaw_ = 0.0;
 };
 
 int main(int argc, char* argv[]) {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<UDPReader>();
-  rclcpp::spin(node);
+  rclcpp::spin(std::make_shared<UDPReader>());
   rclcpp::shutdown();
   return 0;
 }
