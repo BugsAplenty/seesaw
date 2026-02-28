@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<robot name="seesaw">  <!-- Remove xmlns:xacro -->
+  <!-- BASE LINK -->
+  <link name="base_link">
+    <visual>
+      <geometry><box size="0.4 0.3 0.1"/></geometry>
+      <material name="blue"><color rgba="0 0 1 1"/></material>
+    </visual>
+  </link>
+  
+  <!-- IMU -->
+  <link name="imu_link">
+    <visual>
+      <geometry><box size="0.03 0.02 0.015"/></geometry>
+      <material name="green"><color rgba="0 1 0 1"/></material>
+    </visual>
+  </link>
+  <joint name="base_to_imu" type="fixed">
+    <origin xyz="-0.06 0 -0.02"/>
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+  </joint>
+  
+  <!-- LIDAR -->
+  <link name="lidar_link">
+    <visual>
+      <geometry><cylinder radius="0.04" length="0.06"/></geometry>
+      <material name="red"><color rgba="1 0 0 1"/></material>
+    </visual>
+  </link>
+  <joint name="base_to_lidar" type="fixed">
+    <origin xyz="0.015 0 0.04"/>
+    <parent link="base_link"/>
+    <child link="lidar_link"/>
+  </joint>
+</robot>

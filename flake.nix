@@ -22,7 +22,14 @@
             tf2-ros       # tf2 transforms
             tf2           # tf2 core
             tf2-geometry-msgs  # tf2 msg conversions
-            ament-cmake-core
+            
+            # --- Added Missing Dependencies ---
+            ament-cmake             # Replaces ament-cmake-core
+            robot-state-publisher
+            joint-state-publisher   # Headless version avoids PyQt5 conflict
+            ament-lint-auto
+            ament-lint-common
+            
             # --- CLI Debugging Tools ---
             # (rqt suite removed temporarily due to pyqt5/Python 3.13 patch conflicts)
             ros2bag               # Command line tool for recording/playing data

@@ -55,7 +55,15 @@
     },
     "root": {
       "inputs": {
-        "nix-ros-overlay": "nix-ros-overlay"
+        "flake-utils": [
+          "nix-ros-overlay",
+          "flake-utils"
+        ],
+        "nix-ros-overlay": "nix-ros-overlay",
+        "nixpkgs": [
+          "nix-ros-overlay",
+          "nixpkgs"
+        ]
       }
     },
     "systems": {

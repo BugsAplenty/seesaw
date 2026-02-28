@@ -137,9 +137,9 @@ private:
       }
       
       // Stats
-      if ((lidar_packets_ + imu_packets_) % 1000 == 0) {
-        RCLCPP_INFO(get_logger(), "Pkts: lidar=%zu imu=%zu", lidar_packets_, imu_packets_);
-      }
+      // if ((lidar_packets_ + imu_packets_) % 1000 == 0) {
+      //   RCLCPP_INFO(get_logger(), "Pkts: lidar=%zu imu=%zu", lidar_packets_, imu_packets_);
+      // }
     }
   }
   
@@ -191,10 +191,10 @@ private:
       }
     }
     
-    if (valid_points_this_packet > 0) {
-      RCLCPP_INFO(get_logger(), "LIDAR: %d raw → %zu valid pts (total=%zu)", 
-                  npoints, valid_points_this_packet, points_since_reset_);
-    }
+    // if (valid_points_this_packet > 0) {
+    //   RCLCPP_INFO(get_logger(), "LIDAR: %d raw → %zu valid pts (total=%zu)", 
+    //               npoints, valid_points_this_packet, points_since_reset_);
+    // }
   }
 
 
