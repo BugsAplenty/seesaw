@@ -7,20 +7,6 @@
       <material name="blue"><color rgba="0 0 1 1"/></material>
     </visual>
   </link>
-  
-  <!-- IMU -->
-  <link name="imu_link">
-    <visual>
-      <geometry><box size="0.03 0.02 0.015"/></geometry>
-      <material name="green"><color rgba="0 1 0 1"/></material>
-    </visual>
-  </link>
-  <joint name="base_to_imu" type="fixed">
-    <origin xyz="-0.06 0 -0.02"/>
-    <parent link="base_link"/>
-    <child link="imu_link"/>
-  </joint>
-  
   <!-- LIDAR -->
   <link name="lidar_link">
     <visual>

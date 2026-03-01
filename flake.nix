@@ -11,6 +11,8 @@
         ros = pkgs.rosPackages.humble;
         rosEnv = ros.buildEnv {
           paths = with ros; [
+            ament-cmake-core
+            ament-cmake
             ros-core
             rmw-fastrtps-cpp
             rviz2
@@ -22,10 +24,12 @@
             tf2-ros       # tf2 transforms
             tf2           # tf2 core
             tf2-geometry-msgs  # tf2 msg conversions
-            
+            slam-toolbox              # lidar SLAM, fixes yaw drift
+            robot-localization        # EKF fusion node (optional but useful)
+            rf2o-laser-odometry
             # --- Added Missing Dependencies ---
-            ament-cmake             # Replaces ament-cmake-core
             robot-state-publisher
+            imu-tools
             joint-state-publisher   # Headless version avoids PyQt5 conflict
             ament-lint-auto
             ament-lint-common
@@ -53,11 +57,21 @@
             rosEnv
           ];
           shellHook = ''
+            # Source properly first
+            source ${rosEnv}/setup.sh 2>/dev/null || \
+            source ${rosEnv}/share/${rosEnv.name}/local_setup.sh 2>/dev/null || true
+
+            # Explicitly propagate AMENT paths into CMAKE so find_package works
+            export CMAKE_PREFIX_PATH="${rosEnv}:$CMAKE_PREFIX_PATH"
+            export AMENT_PREFIX_PATH="${rosEnv}:$AMENT_PREFIX_PATH"
+
+            # Needed for ament_cmake_core specifically
+            export CMAKE_MODULE_PATH="${rosEnv}/share/ament_cmake_core/cmake:$CMAKE_MODULE_PATH"
+
             export QT_QPA_PLATFORM=xcb
             export QT_QPA_PLATFORM_PLUGIN_PATH=${pkgs.qt5.qtbase}/lib/qt-*/plugins/platforms
             export LD_LIBRARY_PATH=${pkgs.qt5.qtbase}/lib:${pkgs.eigen}/lib:${rosEnv}/lib:$LD_LIBRARY_PATH
             unset QTDIR QT_PLUGIN_PATH QT5DIR
-            eval "$(${rosEnv}/share/${rosEnv.name}/local_setup.sh)"
             export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
             alias cb="colcon build --packages-select seesaw_ros2"
             alias ci="colcon build --packages-up-to seesaw_ros2 --symlink-install"

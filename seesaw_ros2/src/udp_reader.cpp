@@ -3,10 +3,8 @@
 #include <sensor_msgs/msg/imu.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
-#include <tf2/LinearMath/Quaternion.h>
-#include <tf2_ros/transform_broadcaster.h>
 #include <Eigen/Core>
-
+#include <tf2_ros/transform_broadcaster.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -23,30 +21,21 @@ public:
   UDPReader() : Node("udp_reader") {
     rclcpp::QoS sensor_qos = rclcpp::SensorDataQoS();
     lidar_pub_ = create_publisher<sensor_msgs::msg::LaserScan>("/scan", sensor_qos);
-    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu", sensor_qos);
-    odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
     
-    // Init Broadcaster to prevent Exit Code -11
-    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    // We publish the RAW data to /imu for Madgwick to read
+    imu_pub_ = create_publisher<sensor_msgs::msg::Imu>("/imu", sensor_qos);
     
     setup_sockets();
     recv_thread_ = std::thread(&UDPReader::recv_loop, this);
     
-    // Only timer is IMU. Lidar publishes itself automatically on zero-crossing.
     imuodom_timer_ = create_wall_timer(std::chrono::milliseconds(5), 
       std::bind(&UDPReader::publish_imuodom, this));
     
     RCLCPP_INFO(get_logger(), "🚀 UDPReader started.");
   }
-  
-  ~UDPReader() {
-    running_ = false;
-    if (recv_thread_.joinable()) recv_thread_.join();
-    if (lidar_sock_ >= 0) close(lidar_sock_);
-    if (imu_sock_ >= 0) close(imu_sock_);
-  }
-  
+
 private:
+
   void setup_sockets() {
     int reuse = 1; int bufsize = 2*1024*1024; struct timeval tv = {0, 10000};
     
@@ -91,30 +80,21 @@ private:
     if (len != 28) return;
     uint32_t ts_ms; std::memcpy(&ts_ms, data, 4);
     float vals[6]; std::memcpy(vals, data + 4, 24);
-    
+
     Eigen::Vector3f raw_accel{vals[0], vals[1], vals[2]};
     Eigen::Vector3f raw_gyro{vals[3], vals[4], vals[5]};
 
-    // Auto Calibrate on boot
-    if (!imu_calibrated_) {
-      gyro_bias_ += raw_gyro;
-      calib_samples_++;
-      if (calib_samples_ == 1) RCLCPP_INFO(get_logger(), "IMU Calibrating: DO NOT MOVE ROBOT...");
-      if (calib_samples_ >= 200) {
-        gyro_bias_ /= 200.0f;
-        imu_calibrated_ = true;
-        RCLCPP_INFO(get_logger(), "✅ IMU Calibrated! Gyro Bias subtracted.");
-      }
-      return; 
-    }
-    raw_gyro -= gyro_bias_;
+    Eigen::Vector3f fixed_accel{ raw_accel.x(),  raw_accel.y(), -raw_accel.z() };
+    raw_gyro.z() = 0.0f;
+    Eigen::Vector3f fixed_gyro{  raw_gyro.x(),   raw_gyro.y(),  -raw_gyro.z()  };
 
     std::lock_guard<std::mutex> lock(imu_mutex_);
     latest_imu_ts_ = ts_ms / 1000.0;
-    latest_accel_ = raw_accel;
-    latest_gyro_ = raw_gyro;
+    latest_accel_ = fixed_accel;
+    latest_gyro_ = fixed_gyro;
     imu_data_valid_ = true;
-  }
+  } 
+
 
   void parse_lidar(const char* data, ssize_t len) {
     if (len < 20 || len % 20 != 0) return;
@@ -139,7 +119,7 @@ private:
           float abs_angle = fmodf(phi + angle, 360.0f);
           if (abs_angle < 0) abs_angle += 360.0f;
           
-          if (abs_angle < 90.0f && last_angle_ > 270.0f) sweep_complete = true;
+          if (abs_angle < last_angle_ - 180.0f) sweep_complete = true;
           last_angle_ = abs_angle;
 
           int bucket = static_cast<int>(abs_angle * 10.0f) % 3600;
@@ -180,7 +160,7 @@ private:
     lidar_pub_->publish(msg);
   }
 
-  void publish_imuodom() {
+void publish_imuodom() {
     Eigen::Vector3f accel, gyro;
     double ts;
     {
@@ -189,43 +169,28 @@ private:
       ts = latest_imu_ts_; accel = latest_accel_; gyro = latest_gyro_;
     }
     
-    auto now = this->get_clock()->now();
-    double dt = (prev_imu_ts_ > 0) ? (ts - prev_imu_ts_) : 0.005;
-    prev_imu_ts_ = ts;
-    
-    roll_ += gyro.x() * dt;
-    pitch_ += gyro.y() * dt;
-    yaw_ += gyro.z() * dt;
-    
-    tf2::Quaternion q;
-    q.setRPY(roll_, pitch_, yaw_);
-    q.normalize();
-    
-    // Broadcast Dynamic TF
-    geometry_msgs::msg::TransformStamped t;
-    t.header.stamp = now;
-    t.header.frame_id = "odom";
-    t.child_frame_id = "base_link";
-    t.transform.translation.x = 0.0; t.transform.translation.y = 0.0; t.transform.translation.z = 0.0;
-    t.transform.rotation.x = q.x(); t.transform.rotation.y = q.y();
-    t.transform.rotation.z = q.z(); t.transform.rotation.w = q.w();
-    tf_broadcaster_->sendTransform(t);
-    
-    // Publish IMU
     auto imu = sensor_msgs::msg::Imu();
-    imu.header.stamp = now;
-    imu.header.frame_id = "imu_link";
-    imu.orientation.x = q.x(); imu.orientation.y = q.y();
-    imu.orientation.z = q.z(); imu.orientation.w = q.w();
-    imu.angular_velocity.x = gyro.x(); imu.angular_velocity.y = gyro.y(); imu.angular_velocity.z = gyro.z();
+    imu.header.stamp = this->get_clock()->now();
+    imu.header.frame_id = "base_link";   // ← now Madgwick knows: "this is base_link"
+    
+    imu.linear_acceleration.x = accel.x(); 
+    imu.linear_acceleration.y = accel.y(); 
+    imu.linear_acceleration.z = accel.z();
+    
+    imu.angular_velocity.x = gyro.x(); 
+    imu.angular_velocity.y = gyro.y(); 
+    imu.angular_velocity.z = gyro.z();
+
+    imu.orientation_covariance[0] = -1.0;
+
     imu_pub_->publish(imu);
   }
 
+
+  // --- THESE ARE THE VARIABLES THAT WERE MISSING ---
   rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr lidar_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
-  rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   
-  std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   int lidar_sock_ = -1, imu_sock_ = -1;
   std::thread recv_thread_;
   std::atomic<bool> running_{true};
@@ -238,15 +203,11 @@ private:
   float last_angle_ = 0.0f;
   
   std::mutex imu_mutex_;
-  double latest_imu_ts_ = 0, prev_imu_ts_ = 0;
+  double latest_imu_ts_ = 0;
   Eigen::Vector3f latest_accel_, latest_gyro_;
   std::atomic<bool> imu_data_valid_{false};
   
-  bool imu_calibrated_ = false;
-  int calib_samples_ = 0;
-  Eigen::Vector3f gyro_bias_{0, 0, 0};
-  double roll_ = 0.0, pitch_ = 0.0, yaw_ = 0.0;
-};
+}; // <--- THIS BRACE WAS MISSING
 
 int main(int argc, char* argv[]) {
   rclcpp::init(argc, argv);
