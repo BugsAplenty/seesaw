@@ -14,7 +14,7 @@
             ament-cmake-core
             ament-cmake
             ros-core
-            rmw-fastrtps-cpp
+            rmw-cyclonedds-cpp
             rviz2
             rclcpp
             sensor-msgs
@@ -26,14 +26,13 @@
             tf2-geometry-msgs  # tf2 msg conversions
             slam-toolbox              # lidar SLAM, fixes yaw drift
             robot-localization        # EKF fusion node (optional but useful)
-            rf2o-laser-odometry
             # --- Added Missing Dependencies ---
             robot-state-publisher
             imu-tools
             joint-state-publisher   # Headless version avoids PyQt5 conflict
             ament-lint-auto
             ament-lint-common
-            
+            rko-lio
             # --- CLI Debugging Tools ---
             # (rqt suite removed temporarily due to pyqt5/Python 3.13 patch conflicts)
             ros2bag               # Command line tool for recording/playing data
@@ -67,12 +66,13 @@
 
             # Needed for ament_cmake_core specifically
             export CMAKE_MODULE_PATH="${rosEnv}/share/ament_cmake_core/cmake:$CMAKE_MODULE_PATH"
-
+            export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+            export CYCLONEDDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterface name="lo" priority="default"/></Interfaces></General></Domain></CycloneDDS>'
             export QT_QPA_PLATFORM=xcb
             export QT_QPA_PLATFORM_PLUGIN_PATH=${pkgs.qt5.qtbase}/lib/qt-*/plugins/platforms
             export LD_LIBRARY_PATH=${pkgs.qt5.qtbase}/lib:${pkgs.eigen}/lib:${rosEnv}/lib:$LD_LIBRARY_PATH
             unset QTDIR QT_PLUGIN_PATH QT5DIR
-            export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+            export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
             alias cb="colcon build --packages-select seesaw_ros2"
             alias ci="colcon build --packages-up-to seesaw_ros2 --symlink-install"
             alias test="ros2 run seesaw_ros2 udp_reader & sleep 2 && rviz2"

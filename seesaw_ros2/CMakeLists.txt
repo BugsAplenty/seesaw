@@ -13,23 +13,31 @@ find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
-find_package(Eigen3 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 add_executable(udp_reader src/udp_reader.cpp)
+target_compile_features(udp_reader PUBLIC cxx_std_17)
+
 ament_target_dependencies(udp_reader
-  rclcpp sensor_msgs nav_msgs std_msgs geometry_msgs 
-  tf2 tf2_ros tf2_geometry_msgs
+  rclcpp
+  sensor_msgs
+  nav_msgs
+  std_msgs
+  geometry_msgs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
 )
 
-target_include_directories(udp_reader PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-  ${EIGEN3_INCLUDE_DIR}
-)
+target_link_libraries(udp_reader Eigen3::Eigen)
 
 install(TARGETS udp_reader
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY launch urdf
+  DESTINATION share/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)
@@ -38,14 +46,5 @@ if(BUILD_TESTING)
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
-
-install(DIRECTORY launch urdf
-  DESTINATION share/${PROJECT_NAME}
-)
-
-install(PROGRAMS
-  launch/seesaw_visualize.launch.py
-  DESTINATION lib/${PROJECT_NAME}
-)
 
 ament_package()
