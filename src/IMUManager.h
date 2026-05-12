@@ -27,7 +27,7 @@ class IMUManager {
 private:
     Adafruit_MPU6050 mpu;
     unsigned long lastRead = 0;
-    IMUData data;
+    IMUData data{};
     float filteredAngle = 0.0f;
     bool hasInit = false;
 
@@ -35,13 +35,14 @@ public:
     void init() {
         Wire.begin(IMU_SDA, IMU_SCL);
         if (!mpu.begin()) {
-            Serial.println("MPU6050 init failed!");
-            while (1);
+            Serial.println("[IMU] MPU6050 init failed!");
+            while (1) delay(1000);
         }
         mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
         mpu.setGyroRange(MPU6050_RANGE_500_DEG);
         mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
         lastRead = millis();
+        Serial.println("[IMU] MPU6050 initialized");
     }
 
     bool update() {
@@ -52,25 +53,16 @@ public:
         lastRead = now;
 
         sensors_event_t a, g, temp;
-        
-        // Try to read. If it fails, the library usually leaves values at 0.
-        if (!mpu.getEvent(&a, &g, &temp)) {
-            Serial.println("[IMU] I2C Read Failed! Resetting bus...");
+        mpu.getEvent(&a, &g, &temp);
+
+        if (a.acceleration.x == 0.0f && a.acceleration.y == 0.0f && a.acceleration.z == 0.0f &&
+            g.gyro.x == 0.0f && g.gyro.y == 0.0f && g.gyro.z == 0.0f) {
+            Serial.println("[IMU] Suspicious all-zero read; reinitializing I2C and MPU6050");
             Wire.end();
             delay(10);
             Wire.begin(IMU_SDA, IMU_SCL);
-            mpu.begin(); // Re-init the sensor
-            return false; // Skip this cycle
-        }
-
-        // If we got exactly 0.00 for all accel axes, the bus is locked up.
-        if (a.acceleration.x == 0.0f && a.acceleration.y == 0.0f && a.acceleration.z == 0.0f) {
-             Serial.println("[IMU] I2C Locked (All Zeros)! Resetting bus...");
-             Wire.end();
-             delay(10);
-             Wire.begin(IMU_SDA, IMU_SCL);
-             mpu.begin();
-             return false;
+            mpu.begin();
+            return false;
         }
 
         data.accelX = a.acceleration.x;
@@ -79,7 +71,6 @@ public:
         data.gyroX  = g.gyro.x;
         data.gyroY  = g.gyro.y;
         data.gyroZ  = g.gyro.z;
-
 
         float accelAngle = atan2(data.accelX, data.accelZ) * 180.0f / PI;
         float accel360   = wrap360(accelAngle);
@@ -98,6 +89,6 @@ public:
         return true;
     }
 
-    float getFilteredAngle() { return filteredAngle; }
-    IMUData getData()        { return data; }
+    float getFilteredAngle() const { return filteredAngle; }
+    IMUData getData() const        { return data; }
 };

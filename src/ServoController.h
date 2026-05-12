@@ -1,51 +1,77 @@
 #pragma once
-#include <ESP32Servo.h>
+#include <Arduino.h>
+#include <SCServo.h>
 #include "Config.h"
 
 class ServoController {
 private:
-    float targetAngle    = 150.0f;
-    float targetIncrement = 1.5f;
+    SCSCL sc;
     unsigned long lastUpdate = 0;
+    bool online = false;
 
-    static constexpr float TARGET_MIN = 143.0f;
-    static constexpr float TARGET_MAX = 210.0f;
+    int currentPos = SERVO_CENTER_POS;
+    int step = SERVO_STEP_COUNTS;
 
-    static constexpr float ANGLE_MIN = 70.0f;
-    static constexpr float ANGLE_MAX = 130.0f;
-    static constexpr float ANGLE_MID = 100.0f;
+    static constexpr float COUNTS_PER_DEG = 1023.0f / 180.0f;
 
-    static constexpr float Kp = 0.8f;
-
-    float currentAngle = ANGLE_MID;
-
-public:
-    Servo rockingServo;
-
-    void init() {
-        pinMode(SERVO_PIN, OUTPUT);
-        digitalWrite(SERVO_PIN, LOW);
-        delay(100);
-        rockingServo.setPeriodHertz(50);
-        rockingServo.attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
-        rockingServo.write((int)currentAngle);
-        delay(300);
+    static int degToCounts(float deg) {
+        return (int)(deg * COUNTS_PER_DEG + (deg >= 0 ? 0.5f : -0.5f));
     }
 
-    bool update(float filteredAngle) {
+    int minPos() const {
+        return SERVO_CENTER_POS - degToCounts(SERVO_SWEEP_HALF_DEG);
+    }
+
+    int maxPos() const {
+        return SERVO_CENTER_POS + degToCounts(SERVO_SWEEP_HALF_DEG);
+    }
+
+public:
+    void init() {
+        Serial.printf("[SERVO] Serial1 begin @1000000 RX=%d TX=%d ID=%d\n", SERVO_RX_PIN, SERVO_TX_PIN, SERVO_ID);
+        Serial1.begin(1000000, SERIAL_8N1, SERVO_RX_PIN, SERVO_TX_PIN);
+        sc.pSerial = &Serial1;
+        delay(200);
+
+        int ping = sc.Ping(SERVO_ID);
+        online = (ping != -1);
+
+        if (online) {
+            Serial.printf("[SERVO] Online. Ping returned ID=%d\n", ping);
+            sc.WritePos(SERVO_ID, currentPos, 0, SERVO_MOVE_TIME_MS);
+        } else {
+            Serial.printf("[SERVO] Ping failed for ID %d. Check power, wiring, ID, and RX/TX mapping.\n", SERVO_ID);
+        }
+    }
+
+    bool update() {
+        if (!online) return false;
         if (millis() - lastUpdate < SERVO_INTERVAL_MS) return false;
         lastUpdate = millis();
 
-        targetAngle += targetIncrement;
-        if (targetAngle >= TARGET_MAX) { targetAngle = TARGET_MAX; targetIncrement = -fabsf(targetIncrement); }
-        if (targetAngle <= TARGET_MIN) { targetAngle = TARGET_MIN; targetIncrement =  fabsf(targetIncrement); }
+        currentPos += step;
 
-        float error  = targetAngle - filteredAngle;
-        currentAngle = constrain(ANGLE_MID + Kp * error, ANGLE_MIN, ANGLE_MAX);
-        rockingServo.write((int)currentAngle);
+        if (currentPos >= maxPos()) {
+            currentPos = maxPos();
+            step = -abs(step);
+        } else if (currentPos <= minPos()) {
+            currentPos = minPos();
+            step = abs(step);
+        }
+
+        sc.WritePos(SERVO_ID, currentPos, 0, SERVO_MOVE_TIME_MS);
         return true;
     }
 
-    float getTargetAngle() { return targetAngle; }
-    int   getAngle()       { return (int)currentAngle; }
+    float getRelativeAngleDeg() const {
+        return (currentPos - SERVO_CENTER_POS) / COUNTS_PER_DEG;
+    }
+
+    int getTargetPosition() const {
+        return currentPos;
+    }
+
+    bool isOnline() const {
+        return online;
+    }
 };
