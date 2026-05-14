@@ -1,0 +1,19 @@
+/**:
+  ros__parameters:
+    initialization_phase: true
+    deskew: false
+
+    min_range: 0.10
+    max_range: 12.0
+    voxel_size: 0.20
+    max_correspondance_distance: 1.0
+
+    lidar_topic: /points
+    imu_topic: /imu/data
+
+    base_frame: base_link
+    lidar_frame: base_link
+    imu_frame: imu_link
+    odom_frame: odom
+
+    publish_tf: true

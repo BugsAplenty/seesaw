@@ -1,111 +1,353 @@
 #include <Arduino.h>
-#include "Config.h"
-#include "ServoController.h"
-#include "LidarScanner.h"
-#include "UDPManager.h"
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <SCServo.h>
+#include <thijs_rplidar.h>
+
+// ===================== USER CONFIG =====================
+
+#define UDP_REMOTE_IP         IPAddress(192, 168, 68, 59)
+#define UDP_LOCAL_PORT_LIDAR  8888
+#define UDP_REMOTE_PORT_LIDAR 12345
+#define UDP_LOCAL_PORT_IMU    8889
+#define UDP_REMOTE_PORT_IMU   12346
+
+#define IMU_SDA               21
+#define IMU_SCL               22
+#define IMU_READ_INTERVAL_MS  10
+#define IMU_SEND_INTERVAL_MS  20
+
+// ---------------- SERVO ----------------
+SMS_STS st;
+
+#define SERVO_RX_PIN 18
+#define SERVO_TX_PIN 19
+#define SERVO_ID     1
+
+#define POS_LEFT       1300
+#define POS_CENTER     2048
+#define POS_RIGHT      2800
+#define SPEED_FAST     1600
+#define ACCEL_FAST     30
+#define SERVO_DWELL_MS 1000
+
+// ---------------- LIDAR ----------------
+#define LIDAR_MOTOR_PIN 26
+#define LIDAR_RX_PIN    25
+#define LIDAR_TX_PIN    14
+#define LIDAR_SPINUP_MS 700
 
 RPlidar lidar(Serial2);
 
-ServoController servo;
-LidarScanner    lidarScanner;
-UDPManager      udp;
-
-static float g_phi = 0.0f;
+// ---------------- UDP / BUFFERS ----------------
+WiFiUDP lidarUdp;
+WiFiUDP imuUdp;
+Adafruit_MPU6050 mpu;
 
 #define POINTS_PER_PACKET 73
-#define BYTES_PER_POINT   20
-#define PAYLOAD_SIZE      (POINTS_PER_PACKET * BYTES_PER_POINT)
+#define LIDAR_POINT_SIZE  20
+#define LIDAR_PAYLOAD_SIZE (POINTS_PER_PACKET * LIDAR_POINT_SIZE)
 
-static uint8_t  udpBufferA[PAYLOAD_SIZE];
-static uint8_t  udpBufferB[PAYLOAD_SIZE];
-static uint8_t* currentBuffer = udpBufferA;
-static size_t   currentPoints = 0;
+uint8_t lidarBufA[LIDAR_PAYLOAD_SIZE];
+uint8_t lidarBufB[LIDAR_PAYLOAD_SIZE];
+uint8_t* currentLidarBuf = lidarBufA;
+uint8_t* sendLidarBuf = nullptr;
 
-static volatile bool     sendLidarNow = false;
-static uint8_t*          bufferToSend = nullptr;
-static volatile uint32_t g_lidarPointCount = 0;
-static uint32_t          g_lastStatsMs = 0;
-static uint32_t          g_lastForcedUdpMs = 0;
+size_t currentLidarPoints = 0;
+bool sendLidarNow = false;
+bool wifiReady = false;
 
+// ---------------- STATE ----------------
+unsigned long lastServoMoveMs = 0;
+unsigned long lastLidarPrintMs = 0;
+unsigned long lastServoFeedbackMs = 0;
+unsigned long lastImuReadMs = 0;
+unsigned long lastImuSendMs = 0;
+unsigned long lastWifiRetryMs = 0;
+
+uint8_t servoPhase = 0;
+volatile uint32_t lidarPointCount = 0;
+
+float currentServoDeg = 0.0f;
+sensors_event_t a, g, temp;
+
+// ===================== HELPERS =====================
+float servoPosToDeg(int pos) {
+    if (pos >= POS_CENTER) {
+        return 20.0f * (float)(pos - POS_CENTER) / (float)(POS_RIGHT - POS_CENTER);
+    } else {
+        return -20.0f * (float)(POS_CENTER - pos) / (float)(POS_CENTER - POS_LEFT);
+    }
+}
+
+void wifiInit() {
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    lastWifiRetryMs = millis();
+    Serial.printf("[WIFI] Connecting to %s\n", WIFI_SSID);
+}
+
+void wifiUpdate() {
+    if (WiFi.status() == WL_CONNECTED) {
+        if (!wifiReady) {
+            lidarUdp.begin(UDP_LOCAL_PORT_LIDAR);
+            imuUdp.begin(UDP_LOCAL_PORT_IMU);
+            wifiReady = true;
+            Serial.printf("[WIFI] Connected, IP=%s\n", WiFi.localIP().toString().c_str());
+            Serial.printf("[UDP] Lidar -> %s:%d\n", UDP_REMOTE_IP.toString().c_str(), UDP_REMOTE_PORT_LIDAR);
+            Serial.printf("[UDP] IMU   -> %s:%d\n", UDP_REMOTE_IP.toString().c_str(), UDP_REMOTE_PORT_IMU);
+        }
+        return;
+    }
+
+    if (wifiReady) {
+        wifiReady = false;
+        Serial.println("[WIFI] Lost connection");
+    }
+
+    if (millis() - lastWifiRetryMs > 10000) {
+        Serial.println("[WIFI] Retrying...");
+        WiFi.disconnect(true, false);
+        delay(100);
+        WiFi.begin(WIFI_SSID, WIFI_PASS);
+        lastWifiRetryMs = millis();
+    }
+}
+
+void sendUdpPacket(WiFiUDP& udp, uint16_t remotePort, const uint8_t* data, size_t len) {
+    if (!wifiReady) return;
+
+    if (udp.beginPacket(UDP_REMOTE_IP, remotePort)) {
+        udp.write(data, len);
+        udp.endPacket();
+    }
+}
+
+// ===================== SERVO =====================
+void commandServoPhase(uint8_t p) {
+    switch (p) {
+        case 0:
+            Serial.println("[SERVO] -> center");
+            st.WritePosEx(SERVO_ID, POS_CENTER, SPEED_FAST, ACCEL_FAST);
+            break;
+        case 1:
+            Serial.println("[SERVO] -> right");
+            st.WritePosEx(SERVO_ID, POS_RIGHT, SPEED_FAST, ACCEL_FAST);
+            break;
+        case 2:
+            Serial.println("[SERVO] -> center");
+            st.WritePosEx(SERVO_ID, POS_CENTER, SPEED_FAST, ACCEL_FAST);
+            break;
+        default:
+            Serial.println("[SERVO] -> left");
+            st.WritePosEx(SERVO_ID, POS_LEFT, SPEED_FAST, ACCEL_FAST);
+            break;
+    }
+}
+
+void setupServo() {
+    Serial.println("[SERVO] init");
+
+    Serial1.begin(1000000, SERIAL_8N1, SERVO_RX_PIN, SERVO_TX_PIN);
+    st.pSerial = &Serial1;
+
+    delay(1000);
+
+    int ping = st.Ping(SERVO_ID);
+    Serial.printf("[SERVO] ping=%d\n", ping);
+
+    commandServoPhase(servoPhase);
+    lastServoMoveMs = millis();
+}
+
+void updateServo() {
+    if (millis() - lastServoMoveMs >= SERVO_DWELL_MS) {
+        servoPhase = (servoPhase + 1) % 4;
+        commandServoPhase(servoPhase);
+        lastServoMoveMs = millis();
+    }
+
+    if (millis() - lastServoFeedbackMs >= 100) {
+        lastServoFeedbackMs = millis();
+
+        if (st.FeedBack(SERVO_ID) != -1) {
+            int pos = st.ReadPos(-1);
+            currentServoDeg = servoPosToDeg(pos);
+
+            int speed   = st.ReadSpeed(-1);
+            int load    = st.ReadLoad(-1);
+            int voltage = st.ReadVoltage(-1);
+            int temper  = st.ReadTemper(-1);
+            int move    = st.ReadMove(-1);
+            int current = st.ReadCurrent(-1);
+
+            Serial.printf("[SERVO FB] pos=%d speed=%d load=%d volt=%d temp=%d move=%d curr=%d deg=%.2f\n",
+                          pos, speed, load, voltage, temper, move, current, currentServoDeg);
+        } else {
+            Serial.println("[SERVO FB] FeedBack err");
+        }
+    }
+}
+
+// ===================== LIDAR =====================
 void processLidarPoint(float dist, float angle, byte quality) {
-    if (dist <= 0.0f) return;
+    if (dist <= 0) return;
 
-    g_lidarPointCount++;
+    lidarPointCount++;
 
     uint32_t now_us  = micros();
-    uint32_t phi_i   = (uint32_t)((g_phi + 180.0f) * 100.0f);
+    uint32_t phi_i   = (uint32_t)((currentServoDeg + 180.0f) * 100.0f);
     uint32_t angle_i = (uint32_t)(angle * 100.0f);
     uint32_t dist_i  = (uint32_t)dist;
 
-    size_t offset = currentPoints * BYTES_PER_POINT;
-    memcpy(&currentBuffer[offset + 0],  &now_us,  4);
-    memcpy(&currentBuffer[offset + 4],  &phi_i,   4);
-    memcpy(&currentBuffer[offset + 8],  &angle_i, 4);
-    memcpy(&currentBuffer[offset + 12], &dist_i,  4);
-    currentBuffer[offset + 16] = quality;
-    currentBuffer[offset + 17] = 0;
-    currentBuffer[offset + 18] = 0;
-    currentBuffer[offset + 19] = 0;
+    size_t offset = currentLidarPoints * LIDAR_POINT_SIZE;
+    memcpy(&currentLidarBuf[offset + 0],  &now_us,  4);
+    memcpy(&currentLidarBuf[offset + 4],  &phi_i,   4);
+    memcpy(&currentLidarBuf[offset + 8],  &angle_i, 4);
+    memcpy(&currentLidarBuf[offset + 12], &dist_i,  4);
+    currentLidarBuf[offset + 16] = quality;
+    currentLidarBuf[offset + 17] = 0;
+    currentLidarBuf[offset + 18] = 0;
+    currentLidarBuf[offset + 19] = 0;
 
-    currentPoints++;
+    currentLidarPoints++;
 
-    if (currentPoints >= POINTS_PER_PACKET) {
-        bufferToSend = currentBuffer;
-        currentBuffer = (currentBuffer == udpBufferA) ? udpBufferB : udpBufferA;
-        currentPoints = 0;
+    if (millis() - lastLidarPrintMs >= 250) {
+        lastLidarPrintMs = millis();
+        Serial.printf("[LIDAR] dist=%.0f mm angle=%.2f deg q=%u total=%lu phi=%.2f\n",
+                      dist, angle, (unsigned)quality, (unsigned long)lidarPointCount, currentServoDeg);
+    }
+
+    if (currentLidarPoints >= POINTS_PER_PACKET) {
+        sendLidarBuf = currentLidarBuf;
+        currentLidarBuf = (currentLidarBuf == lidarBufA) ? lidarBufB : lidarBufA;
+        currentLidarPoints = 0;
         sendLidarNow = true;
     }
 }
 
+void setupLidar() {
+    Serial.println("[LIDAR] init");
+
+    pinMode(LIDAR_MOTOR_PIN, OUTPUT);
+    digitalWrite(LIDAR_MOTOR_PIN, HIGH);
+    delay(LIDAR_SPINUP_MS);
+
+    Serial2.setRxBufferSize(2048);
+    lidar.init(LIDAR_RX_PIN, LIDAR_TX_PIN);
+
+    lidar.printLidarInfo();
+
+    if (lidar.connectionCheck()) {
+        Serial.println("[LIDAR] connectionCheck OK");
+    } else {
+        Serial.println("[LIDAR] connectionCheck FAILED");
+    }
+
+    lidar.postParseCallback = [](RPlidar* ptr,
+                                 uint16_t dist,
+                                 uint16_t angle_q6,
+                                 uint8_t newRotFlag,
+                                 int8_t quality) {
+        (void)ptr;
+        (void)newRotFlag;
+
+        if (dist > 0) {
+            processLidarPoint((float)dist, angle_q6 / 64.0f, (byte)quality);
+        }
+    };
+
+    Serial.println("[LIDAR] startExpressScan(DENSE)...");
+    if (!lidar.startExpressScan(2)) {
+        Serial.println("[LIDAR] express failed -> standard scan");
+        if (!lidar.startStandardScan()) {
+            Serial.println("[LIDAR] standard scan failed");
+        }
+    } else {
+        Serial.println("[LIDAR] express started");
+    }
+}
+
+void updateLidar() {
+    for (int i = 0; i < 10; i++) {
+        lidar.handleData(false, false);
+    }
+
+    if (sendLidarNow && sendLidarBuf != nullptr) {
+        sendUdpPacket(lidarUdp, UDP_REMOTE_PORT_LIDAR, sendLidarBuf, LIDAR_PAYLOAD_SIZE);
+        sendLidarNow = false;
+    }
+}
+
+// ===================== IMU =====================
+void setupImu() {
+    Serial.println("[IMU] init");
+    Wire.begin(IMU_SDA, IMU_SCL);
+
+    if (!mpu.begin()) {
+        Serial.println("[IMU] MPU6050 init failed!");
+        return;
+    }
+
+    mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    Serial.println("[IMU] MPU6050 initialized");
+}
+
+void updateImu() {
+    if (millis() - lastImuReadMs >= IMU_READ_INTERVAL_MS) {
+        lastImuReadMs = millis();
+        mpu.getEvent(&a, &g, &temp);
+    }
+
+    if (millis() - lastImuSendMs >= IMU_SEND_INTERVAL_MS) {
+        lastImuSendMs = millis();
+
+        uint8_t buf[28];
+        uint32_t now_us = micros();
+
+        memcpy(&buf[0],  &now_us,             4);
+        memcpy(&buf[4],  &a.acceleration.x,   4);
+        memcpy(&buf[8],  &a.acceleration.y,   4);
+        memcpy(&buf[12], &a.acceleration.z,   4);
+        memcpy(&buf[16], &g.gyro.x,           4);
+        memcpy(&buf[20], &g.gyro.y,           4);
+        memcpy(&buf[24], &g.gyro.z,           4);
+
+        sendUdpPacket(imuUdp, UDP_REMOTE_PORT_IMU, buf, sizeof(buf));
+
+        static unsigned long lastImuPrintMs = 0;
+        if (millis() - lastImuPrintMs >= 500) {
+            lastImuPrintMs = millis();
+            Serial.printf("[IMU] ax=%.2f ay=%.2f az=%.2f gx=%.2f gy=%.2f gz=%.2f\n",
+                          a.acceleration.x, a.acceleration.y, a.acceleration.z,
+                          g.gyro.x, g.gyro.y, g.gyro.z);
+        }
+    }
+}
+
+// ===================== ARDUINO =====================
 void setup() {
     Serial.begin(115200);
     delay(1000);
+
     Serial.println();
-    Serial.println("[BOOT] Rocking Lidar starting...");
+    Serial.println("[BOOT] Servo + Lidar + IMU + UDP");
 
-    servo.init();
-    lidarScanner.init();
-    udp.init();
-
-    g_phi = servo.getRelativeAngleDeg();
-    g_lastStatsMs = millis();
-    g_lastForcedUdpMs = millis();
+    setupServo();
+    setupLidar();
+    setupImu();
+    wifiInit();
 }
 
 void loop() {
-    if (servo.update()) {
-        g_phi = servo.getRelativeAngleDeg();
-    }
-
-    for (int i = 0; i < 10; i++) {
-        lidarScanner.update();
-    }
-
-    udp.update();
-
-    if (sendLidarNow && bufferToSend != nullptr) {
-        udp.sendLidarPoints(bufferToSend, PAYLOAD_SIZE);
-        sendLidarNow = false;
-    }
-
-    if (udp.isConnected() && millis() - g_lastForcedUdpMs >= 1000) {
-        const char* msg = "lidar-alive";
-        udp.sendTestPacket((const uint8_t*)msg, strlen(msg));
-        g_lastForcedUdpMs = millis();
-    }
-
-    if (millis() - g_lastStatsMs >= 1000) {
-        Serial.printf(
-            "[STAT] servo_online=%d pos=%d phi=%.2f wifi=%d udp=%d lidar_points=%lu partial=%u queued=%d\n",
-            servo.isOnline(),
-            servo.getTargetPosition(),
-            g_phi,
-            WiFi.status(),
-            udp.isConnected(),
-            (unsigned long)g_lidarPointCount,
-            (unsigned)currentPoints,
-            sendLidarNow ? 1 : 0
-        );
-        g_lastStatsMs = millis();
-    }
+    wifiUpdate();
+    updateServo();
+    updateLidar();
+    updateImu();
+    delay(1);
 }
