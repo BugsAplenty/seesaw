@@ -33,7 +33,7 @@ SMS_STS st;
 #define POS_LEFT                1100
 #define POS_CENTER              2048
 #define POS_RIGHT               2600
-#define SERVO_SPEED             300
+#define SERVO_SPEED             2400
 #define SERVO_ACCEL             30
 #define SERVO_DWELL_MS          3000
 #define SERVO_SEND_INTERVAL_MS  50
@@ -221,13 +221,11 @@ void processLidarPoint(float dist, float angle, byte quality) {
     lidarPointCount++;
 
     uint32_t now_us  = micros();
-    uint32_t phi_i   = (uint32_t)((currentServoDeg + 180.0f) * 100.0f);
     uint32_t angle_i = (uint32_t)(angle * 100.0f);
     uint32_t dist_i  = (uint32_t)dist;
 
     size_t offset = currentLidarPoints * LIDAR_POINT_SIZE;
     memcpy(&currentLidarBuf[offset + 0],  &now_us,  4);
-    memcpy(&currentLidarBuf[offset + 4],  &phi_i,   4);
     memcpy(&currentLidarBuf[offset + 8],  &angle_i, 4);
     memcpy(&currentLidarBuf[offset + 12], &dist_i,  4);
     currentLidarBuf[offset + 16] = quality;
@@ -236,12 +234,6 @@ void processLidarPoint(float dist, float angle, byte quality) {
     currentLidarBuf[offset + 19] = 0;
 
     currentLidarPoints++;
-
-    if (millis() - lastLidarPrintMs >= 250) {
-        lastLidarPrintMs = millis();
-        Serial.printf("[LIDAR] dist=%.0f mm angle=%.2f deg q=%u total=%lu phi=%.2f\n",
-                      dist, angle, (unsigned)quality, (unsigned long)lidarPointCount, currentServoDeg);
-    }
 
     if (currentLidarPoints >= POINTS_PER_PACKET) {
         sendLidarBuf = currentLidarBuf;
