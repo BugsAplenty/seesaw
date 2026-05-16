@@ -14,6 +14,9 @@
 #define UDP_REMOTE_PORT_LIDAR 12345
 #define UDP_LOCAL_PORT_IMU    8889
 #define UDP_REMOTE_PORT_IMU   12346
+#define UDP_LOCAL_PORT_SERVO   8890
+#define UDP_REMOTE_PORT_SERVO  12347
+
 
 #define IMU_SDA               21
 #define IMU_SCL               22
@@ -27,12 +30,13 @@ SMS_STS st;
 #define SERVO_TX_PIN 19
 #define SERVO_ID     1
 
-#define POS_LEFT       1300
-#define POS_CENTER     2048
-#define POS_RIGHT      2800
-#define SPEED_FAST     1600
-#define ACCEL_FAST     30
-#define SERVO_DWELL_MS 1000
+#define POS_LEFT                1100
+#define POS_CENTER              2048
+#define POS_RIGHT               2600
+#define SERVO_SPEED             300
+#define SERVO_ACCEL             30
+#define SERVO_DWELL_MS          3000
+#define SERVO_SEND_INTERVAL_MS  50
 
 // ---------------- LIDAR ----------------
 #define LIDAR_MOTOR_PIN 26
@@ -45,6 +49,7 @@ RPlidar lidar(Serial2);
 // ---------------- UDP / BUFFERS ----------------
 WiFiUDP lidarUdp;
 WiFiUDP imuUdp;
+WiFiUDP servoUdp;
 Adafruit_MPU6050 mpu;
 
 #define POINTS_PER_PACKET 73
@@ -57,13 +62,14 @@ uint8_t* currentLidarBuf = lidarBufA;
 uint8_t* sendLidarBuf = nullptr;
 
 size_t currentLidarPoints = 0;
-bool sendLidarNow = false;
+volatile bool sendLidarNow = false;
 bool wifiReady = false;
 
 // ---------------- STATE ----------------
 unsigned long lastServoMoveMs = 0;
 unsigned long lastLidarPrintMs = 0;
 unsigned long lastServoFeedbackMs = 0;
+unsigned long lastServoSendMs = 0;
 unsigned long lastImuReadMs = 0;
 unsigned long lastImuSendMs = 0;
 unsigned long lastWifiRetryMs = 0;
@@ -73,6 +79,14 @@ volatile uint32_t lidarPointCount = 0;
 
 float currentServoDeg = 0.0f;
 sensors_event_t a, g, temp;
+
+struct __attribute__((packed)) ServoPacket {
+    uint32_t t_us;
+    float angle_deg;
+    int16_t pos;
+    uint8_t phase;
+    uint8_t reserved[1];
+};
 
 // ===================== HELPERS =====================
 float servoPosToDeg(int pos) {
@@ -95,10 +109,12 @@ void wifiUpdate() {
         if (!wifiReady) {
             lidarUdp.begin(UDP_LOCAL_PORT_LIDAR);
             imuUdp.begin(UDP_LOCAL_PORT_IMU);
+            servoUdp.begin(UDP_LOCAL_PORT_SERVO);
             wifiReady = true;
             Serial.printf("[WIFI] Connected, IP=%s\n", WiFi.localIP().toString().c_str());
             Serial.printf("[UDP] Lidar -> %s:%d\n", UDP_REMOTE_IP.toString().c_str(), UDP_REMOTE_PORT_LIDAR);
             Serial.printf("[UDP] IMU   -> %s:%d\n", UDP_REMOTE_IP.toString().c_str(), UDP_REMOTE_PORT_IMU);
+            Serial.printf("[UDP] Servo -> %s:%d\n", UDP_REMOTE_IP.toString().c_str(), UDP_REMOTE_PORT_SERVO);
         }
         return;
     }
@@ -131,19 +147,19 @@ void commandServoPhase(uint8_t p) {
     switch (p) {
         case 0:
             Serial.println("[SERVO] -> center");
-            st.WritePosEx(SERVO_ID, POS_CENTER, SPEED_FAST, ACCEL_FAST);
+            st.WritePosEx(SERVO_ID, POS_CENTER, SERVO_SPEED, SERVO_ACCEL);
             break;
         case 1:
             Serial.println("[SERVO] -> right");
-            st.WritePosEx(SERVO_ID, POS_RIGHT, SPEED_FAST, ACCEL_FAST);
+            st.WritePosEx(SERVO_ID, POS_RIGHT, SERVO_SPEED, SERVO_ACCEL);
             break;
         case 2:
             Serial.println("[SERVO] -> center");
-            st.WritePosEx(SERVO_ID, POS_CENTER, SPEED_FAST, ACCEL_FAST);
+            st.WritePosEx(SERVO_ID, POS_CENTER, SERVO_SPEED, SERVO_ACCEL);
             break;
         default:
             Serial.println("[SERVO] -> left");
-            st.WritePosEx(SERVO_ID, POS_LEFT, SPEED_FAST, ACCEL_FAST);
+            st.WritePosEx(SERVO_ID, POS_LEFT, SERVO_SPEED, SERVO_ACCEL);
             break;
     }
 }
@@ -163,6 +179,19 @@ void setupServo() {
     lastServoMoveMs = millis();
 }
 
+void sendServoTelemetry(float angleDeg, int pos, uint8_t phase) {
+    if (!wifiReady) return;
+
+    ServoPacket pkt;
+    pkt.t_us = micros();
+    pkt.angle_deg = angleDeg;
+    pkt.pos = (int16_t)pos;
+    pkt.phase = phase;
+    pkt.reserved[0] = 0;
+
+    sendUdpPacket(servoUdp, UDP_REMOTE_PORT_SERVO, (const uint8_t*)&pkt, sizeof(pkt));
+}
+
 void updateServo() {
     if (millis() - lastServoMoveMs >= SERVO_DWELL_MS) {
         servoPhase = (servoPhase + 1) % 4;
@@ -170,24 +199,17 @@ void updateServo() {
         lastServoMoveMs = millis();
     }
 
-    if (millis() - lastServoFeedbackMs >= 100) {
+    if (millis() - lastServoFeedbackMs >= 20) {
         lastServoFeedbackMs = millis();
 
         if (st.FeedBack(SERVO_ID) != -1) {
             int pos = st.ReadPos(-1);
             currentServoDeg = servoPosToDeg(pos);
 
-            int speed   = st.ReadSpeed(-1);
-            int load    = st.ReadLoad(-1);
-            int voltage = st.ReadVoltage(-1);
-            int temper  = st.ReadTemper(-1);
-            int move    = st.ReadMove(-1);
-            int current = st.ReadCurrent(-1);
-
-            Serial.printf("[SERVO FB] pos=%d speed=%d load=%d volt=%d temp=%d move=%d curr=%d deg=%.2f\n",
-                          pos, speed, load, voltage, temper, move, current, currentServoDeg);
-        } else {
-            Serial.println("[SERVO FB] FeedBack err");
+            if (millis() - lastServoSendMs >= SERVO_SEND_INTERVAL_MS) {
+                lastServoSendMs = millis();
+                sendServoTelemetry(currentServoDeg, pos, servoPhase);
+            }
         }
     }
 }
@@ -272,8 +294,11 @@ void setupLidar() {
 }
 
 void updateLidar() {
-    for (int i = 0; i < 10; i++) {
-        lidar.handleData(false, false);
+    int decode_count = 0;
+    while (decode_count < 100) {
+        int n = lidar.handleData(false, false);
+        if (n <= 0) break;
+        decode_count++;
     }
 
     if (sendLidarNow && sendLidarBuf != nullptr) {
@@ -348,6 +373,5 @@ void loop() {
     wifiUpdate();
     updateServo();
     updateLidar();
-    updateImu();
-    delay(1);
+    // updateImu();
 }

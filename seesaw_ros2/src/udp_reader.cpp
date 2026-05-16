@@ -419,9 +419,9 @@ private:
       return;
     }
 
-    uint32_t ts_ms = 0;
+    uint32_t ts_us = 0;
     float vals[6]{};
-    std::memcpy(&ts_ms, data, 4);
+    std::memcpy(&ts_us, data, 4);
     std::memcpy(vals, data + 4, 24);
 
     const float raw_ax = vals[0];
@@ -442,7 +442,7 @@ private:
     {
       std::lock_guard<std::mutex> lock(imu_mutex_);
       latest_imu_host_stamp_ = now();
-      latest_imu_sensor_ms_ = ts_ms;
+      latest_imu_sensor_ms_ = ts_us;
       latest_accel_ = accel;
       latest_gyro_ = gyro;
       imu_valid_ = true;
@@ -452,9 +452,9 @@ private:
 
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 2000,
-      "[imu] parsed packets=%lu latest ts_ms=%u raw_accel=(%.4f, %.4f, %.4f) raw_gyro=(%.4f, %.4f, %.4f) fixed_accel=(%.4f, %.4f, %.4f) fixed_gyro=(%.4f, %.4f, %.4f)",
+      "[imu] parsed packets=%lu latest ts_us=%u raw_accel=(%.4f, %.4f, %.4f) raw_gyro=(%.4f, %.4f, %.4f) fixed_accel=(%.4f, %.4f, %.4f) fixed_gyro=(%.4f, %.4f, %.4f)",
       static_cast<unsigned long>(imu_packets_parsed_.load(std::memory_order_relaxed)),
-      ts_ms,
+      ts_us,
       raw_ax, raw_ay, raw_az,
       raw_gx, raw_gy, raw_gz,
       accel.x(), accel.y(), accel.z(),
@@ -656,7 +656,7 @@ private:
 
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 2000,
-      "[imu_pub] published=%lu frame=%s sensor_ts_ms=%u accel=(%.4f, %.4f, %.4f) gyro=(%.4f, %.4f, %.4f) subs=%zu",
+      "[imu_pub] published=%lu frame=%s sensor_ts_us=%u accel=(%.4f, %.4f, %.4f) gyro=(%.4f, %.4f, %.4f) subs=%zu",
       static_cast<unsigned long>(imu_published_.load(std::memory_order_relaxed)),
       imu_frame_.c_str(),
       sensor_ms,
