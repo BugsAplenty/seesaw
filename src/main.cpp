@@ -8,7 +8,6 @@
 #include <thijs_rplidar.h>
 
 // ===================== USER CONFIG =====================
-
 #define UDP_REMOTE_IP         IPAddress(192, 168, 68, 59)
 #define UDP_LOCAL_PORT_LIDAR  8888
 #define UDP_REMOTE_PORT_LIDAR 12345
@@ -24,18 +23,17 @@
 #define IMU_SEND_INTERVAL_MS  20
 
 // ---------------- SERVO ----------------
-SMS_STS st;
+SCSCL sc;
 
 #define SERVO_RX_PIN 18
 #define SERVO_TX_PIN 19
 #define SERVO_ID     1
 
-#define POS_LEFT                1100
-#define POS_CENTER              2048
-#define POS_RIGHT               2600
-#define SERVO_SPEED             2400
-#define SERVO_ACCEL             30
-#define SERVO_DWELL_MS          3000
+#define POS_LEFT    0
+#define POS_CENTER  511
+#define POS_RIGHT   1023
+#define SERVO_SPEED             500
+#define SERVO_DWELL_MS          500
 #define SERVO_SEND_INTERVAL_MS  50
 
 // ---------------- LIDAR ----------------
@@ -144,23 +142,12 @@ void sendUdpPacket(WiFiUDP& udp, uint16_t remotePort, const uint8_t* data, size_
 
 // ===================== SERVO =====================
 void commandServoPhase(uint8_t p) {
-    switch (p) {
-        case 0:
-            Serial.println("[SERVO] -> center");
-            st.WritePosEx(SERVO_ID, POS_CENTER, SERVO_SPEED, SERVO_ACCEL);
-            break;
-        case 1:
-            Serial.println("[SERVO] -> right");
-            st.WritePosEx(SERVO_ID, POS_RIGHT, SERVO_SPEED, SERVO_ACCEL);
-            break;
-        case 2:
-            Serial.println("[SERVO] -> center");
-            st.WritePosEx(SERVO_ID, POS_CENTER, SERVO_SPEED, SERVO_ACCEL);
-            break;
-        default:
-            Serial.println("[SERVO] -> left");
-            st.WritePosEx(SERVO_ID, POS_LEFT, SERVO_SPEED, SERVO_ACCEL);
-            break;
+    if (p == 0) {
+        Serial.println("[SERVO] -> left");
+        sc.WritePos(SERVO_ID, POS_LEFT, 0, SERVO_SPEED);
+    } else {
+        Serial.println("[SERVO] -> right");
+        sc.WritePos(SERVO_ID, POS_RIGHT, 0, SERVO_SPEED);
     }
 }
 
@@ -168,11 +155,11 @@ void setupServo() {
     Serial.println("[SERVO] init");
 
     Serial1.begin(1000000, SERIAL_8N1, SERVO_RX_PIN, SERVO_TX_PIN);
-    st.pSerial = &Serial1;
+    sc.pSerial = &Serial1;
 
     delay(1000);
 
-    int ping = st.Ping(SERVO_ID);
+    int ping = sc.Ping(SERVO_ID);
     Serial.printf("[SERVO] ping=%d\n", ping);
 
     commandServoPhase(servoPhase);
@@ -193,22 +180,26 @@ void sendServoTelemetry(float angleDeg, int pos, uint8_t phase) {
 }
 
 void updateServo() {
-    if (millis() - lastServoMoveMs >= SERVO_DWELL_MS) {
-        servoPhase = (servoPhase + 1) % 4;
-        commandServoPhase(servoPhase);
-        lastServoMoveMs = millis();
-    }
-
-    if (millis() - lastServoFeedbackMs >= 20) {
+    // Read the servo status every 50ms
+    if (millis() - lastServoFeedbackMs >= 50) {
         lastServoFeedbackMs = millis();
 
-        if (st.FeedBack(SERVO_ID) != -1) {
-            int pos = st.ReadPos(-1);
-            currentServoDeg = servoPosToDeg(pos);
+        if (sc.FeedBack(SERVO_ID) != -1) {
+            int currentPos = sc.ReadPos(-1);
+            int isMoving   = sc.ReadMove(-1); // 1 = moving, 0 = stopped
+            
+            currentServoDeg = servoPosToDeg(currentPos);
 
+            // 1. Send Telemetry
             if (millis() - lastServoSendMs >= SERVO_SEND_INTERVAL_MS) {
                 lastServoSendMs = millis();
-                sendServoTelemetry(currentServoDeg, pos, servoPhase);
+                sendServoTelemetry(currentServoDeg, currentPos, servoPhase);
+            }
+
+            // 2. Reverse direction ONLY when it has completely stopped at the target
+            if (isMoving == 0) {
+                servoPhase = (servoPhase == 0) ? 1 : 0;
+                commandServoPhase(servoPhase);
             }
         }
     }
