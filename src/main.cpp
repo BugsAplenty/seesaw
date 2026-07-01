@@ -5,9 +5,10 @@
 #include <thijs_rplidar.h>
 
 // ===================== USER CONFIG =====================
-#define UDP_REMOTE_IP         IPAddress(192, 168, 68, 59)
+#define UDP_REMOTE_IP         IPAddress(192, 168, 68, 22)
 #define UDP_LOCAL_PORT_LIDAR  8888
 #define UDP_REMOTE_PORT_LIDAR 12345
+
 
 // ---------------- SERVO ----------------
 SCSCL sc;
