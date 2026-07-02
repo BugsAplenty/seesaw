@@ -77,14 +77,6 @@
             alias ci="colcon build --packages-up-to seesaw_ros2 --symlink-install"
             alias test="ros2 run seesaw_ros2 udp_reader & sleep 2 && rviz2"
             echo "=== Seesaw ROS2 C++ Ready ==="
-            echo "- Debugging tools active: ros2 bag, tf2_tools, rviz2"
-            echo "- mkdir -p seesaw_ros2/src"
-            echo "- cd seesaw_ros2"
-            echo "- cb  # or ci for symlink-install"
-            echo "- source install/setup.bash"
-            echo "- ros2 run seesaw_ros2 udp_reader --ros-args -p lidar_port:=12345 -p imu_port:=12346"
-            echo "- In new term: rviz2 -d /opt/ros/humble/share/nav2_bringup/rviz/nav2_default_view.rviz"
-            echo "- Send UDP to ports 12345(lidar)/12346(imu) from ESP32"
           '';
         };
       });
