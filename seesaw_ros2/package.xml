@@ -12,6 +12,7 @@
   <depend>rclcpp</depend>
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
+  <depend>sensor_msgs_py</depend>
   <depend>robot_state_publisher</depend>
   <depend>rviz2</depend>
   <depend>imu_filter_madgwick</depend>

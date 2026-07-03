@@ -26,7 +26,7 @@ install(TARGETS
 )
 
 install(PROGRAMS
-  scripts/pitch_joint_publisher.py
+  scripts/scan_to_cloud.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
