@@ -9,7 +9,6 @@
 #define UDP_LOCAL_PORT_LIDAR  8888
 #define UDP_REMOTE_PORT_LIDAR 12345
 
-
 // ---------------- SERVO ----------------
 SCSCL sc;
 
@@ -20,7 +19,7 @@ SCSCL sc;
 #define POS_LEFT     0
 #define POS_CENTER   511
 #define POS_RIGHT    1023
-#define SERVO_SPEED  500
+#define SERVO_SPEED  100
 
 // ---------------- LIDAR ----------------
 #define LIDAR_MOTOR_PIN 26
