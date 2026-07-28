@@ -5,7 +5,7 @@
 #include <thijs_rplidar.h>
 
 // ===================== USER CONFIG =====================
-#define UDP_REMOTE_IP         IPAddress(192, 168, 68, 22)
+#define UDP_REMOTE_IP         IPAddress(255, 255, 255, 255)
 #define UDP_LOCAL_PORT_LIDAR  8888
 #define UDP_REMOTE_PORT_LIDAR 12345
 
@@ -16,10 +16,9 @@ SCSCL sc;
 #define SERVO_TX_PIN 19
 #define SERVO_ID     1
 
-#define POS_LEFT     0
-#define POS_CENTER   511
-#define POS_RIGHT    1023
-#define SERVO_SPEED  100
+#define POS_START    600
+#define POS_END      900
+#define SERVO_SPEED  200
 
 // ---------------- LIDAR ----------------
 #define LIDAR_MOTOR_PIN 26
@@ -66,19 +65,10 @@ volatile uint32_t lidarFlushPartialCount = 0;
 volatile uint32_t lidarHandleCalls = 0;
 volatile uint32_t lidarHandlePositive = 0;
 
-float currentServoDeg = 0.0f;
-int currentServoPos = POS_CENTER;
+int currentServoPos = POS_START;
 uint32_t lastLidarFlushUs = 0;
 
 // ===================== HELPERS =====================
-float servoPosToDeg(int pos) {
-    if (pos >= POS_CENTER) {
-        return 20.0f * (float)(pos - POS_CENTER) / (float)(POS_RIGHT - POS_CENTER);
-    } else {
-        return -20.0f * (float)(POS_CENTER - pos) / (float)(POS_CENTER - POS_LEFT);
-    }
-}
-
 uint16_t clampServoRaw(int pos) {
     if (pos < 0) return 0;
     if (pos > 1023) return 1023;
@@ -159,10 +149,10 @@ void sendQueuedLidarPacket() {
 void commandServoPhase(uint8_t p) {
     if (p == 0) {
         Serial.println("[SERVO] -> left");
-        sc.WritePos(SERVO_ID, POS_LEFT, 0, SERVO_SPEED);
+        sc.WritePos(SERVO_ID, POS_START, 0, SERVO_SPEED);
     } else {
         Serial.println("[SERVO] -> right");
-        sc.WritePos(SERVO_ID, POS_RIGHT, 0, SERVO_SPEED);
+        sc.WritePos(SERVO_ID, POS_END, 0, SERVO_SPEED);
     }
 }
 
@@ -189,7 +179,6 @@ void updateServo() {
             int isMoving = sc.ReadMove(-1);
 
             currentServoPos = pos;
-            currentServoDeg = servoPosToDeg(currentServoPos);
 
             if (isMoving == 0) {
                 servoPhase = (servoPhase == 0) ? 1 : 0;
@@ -287,7 +276,7 @@ void updateLidar() {
 
     if (millis() - lastLidarPrintMs >= 1000) {
         lastLidarPrintMs = millis();
-        Serial.printf("[LIDAR] pts=%lu pkts=%lu partial=%lu handle=%lu pos=%lu queued=%u servo_pos=%d servo_deg=%.2f phase=%u\n",
+        Serial.printf("[LIDAR] pts=%lu pkts=%lu partial=%lu handle=%lu pos=%lu queued=%u servo_pos=%d phase=%u\n",
                       (unsigned long)lidarPointCount,
                       (unsigned long)lidarPacketCount,
                       (unsigned long)lidarFlushPartialCount,
@@ -295,7 +284,6 @@ void updateLidar() {
                       (unsigned long)lidarHandlePositive,
                       (unsigned)currentLidarPoints,
                       currentServoPos,
-                      currentServoDeg,
                       servoPhase);
     }
 }

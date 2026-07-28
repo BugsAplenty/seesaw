@@ -67,13 +67,20 @@ public:
   }
 
 private:
-  void open_socket(int & sock, int port, const char * label)
-  {
+  void open_socket(int & sock, int port, const char * label) {
     sock = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0) throw std::runtime_error(std::string("socket() failed for ") + label);
 
     int reuse = 1;
     ::setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    
+    // --- ENABLE UDP BROADCAST RECEPTION ---
+    int broadcastEnable = 1;
+    if (::setsockopt(sock, SOL_SOCKET, SO_BROADCAST, &broadcastEnable, sizeof(broadcastEnable)) < 0) {
+      RCLCPP_WARN(get_logger(), "[%s] setsockopt(SO_BROADCAST) failed: %s", label, std::strerror(errno));
+    }
+    // --------------------------------------
+
     ::setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &recv_buffer_bytes_, sizeof(recv_buffer_bytes_));
 
     int flags = ::fcntl(sock, F_GETFL, 0);
@@ -89,7 +96,6 @@ private:
       throw std::runtime_error(std::string("bind() failed for ") + label + " port " + std::to_string(port));
     }
   }
-
   void close_socket(int & sock, const char *) {
     if (sock >= 0) { ::close(sock); sock = -1; }
   }
