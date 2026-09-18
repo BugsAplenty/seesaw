@@ -1,0 +1,35 @@
+# Seesaw rocking-lidar parameters.
+# Serial ports come from launch arguments (lidar_port / servo_port).
+
+sc15_driver:
+  ros__parameters:
+    baud_rate: 1000000        # probe-confirmed
+    servo_id: 1               # probe-confirmed
+    center_pos: 511           # SC15: 180 deg / 1024 counts, middle = 511
+    counts_per_rev: 2048      # 1024 counts per 180 deg
+    min_angle_deg: -86.0      # -> counts 340..682, well inside 0..1023
+    max_angle_deg: 86.0
+    sweep_period: 8.0         # seconds per full out-and-back cycle
+    profile: sine             # "sine" (smooth) or "triangle"
+    speed: 400                # steps/s (~70 deg/s at the 1024/180deg scale)
+    control_rate: 50.0        # Hz
+    readback: true            # use measured servo position for TF
+    parent_frame: lidar_mount
+    child_frame: laser
+
+scan_to_cloud:
+  ros__parameters:
+    scan_topic: /scan                # LaserScan from rplidar_ros
+    tilt_topic: /sc15_driver/tilt    # radians, from sc15_driver
+    tilt_units: radians
+    output_topic: /points
+    scan_plane: vertical             # lidar mounted on its side
+    plane_rotation_deg: 90.0
+    pivot_x: 0.0                     # lidar origin offset from servo axis (m)
+    pivot_y: 0.0
+    pivot_z: 0.0
+    accum_seconds: 3.0
+    max_range: 12.0
+    base_frame: base_link
+    mount_frame: lidar_mount
+    laser_frame: laser

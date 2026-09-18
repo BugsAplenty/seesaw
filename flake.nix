@@ -1,83 +1,68 @@
 {
-  inputs.nix-ros-overlay.url = "github:lopsided98/nix-ros-overlay";
+  description = "ROS 2 (Jazzy) dev environment for a z-lethic-style rocking lidar: Waveshare SC15 bus servo + Slamtec RPLidar A1M8";
 
-  outputs = { self, nix-ros-overlay }:
-    nix-ros-overlay.inputs.flake-utils.lib.eachDefaultSystem (system:
+  inputs = {
+    nix-ros-overlay.url = "github:lopsided98/nix-ros-overlay/master";
+    nixpkgs.follows = "nix-ros-overlay/nixpkgs";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
+
+  outputs = { self, nix-ros-overlay, nixpkgs, flake-utils }:
+    flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nix-ros-overlay {
+        pkgs = import nixpkgs {
           inherit system;
           overlays = [ nix-ros-overlay.overlays.default ];
         };
-        ros = pkgs.rosPackages.humble;
-        rosEnv = ros.buildEnv {
-          paths = with ros; [
-            ament-cmake-core
-            ament-cmake
-            ros-core
-            rmw-cyclonedds-cpp
-            rviz2
-            rclcpp
-            sensor-msgs
-            nav-msgs      # Odometry
-            std-msgs      # Header
-            geometry-msgs # Quaternion/Pose/Twist/Vector3
-            tf2-ros       # tf2 transforms
-            tf2           # tf2 core
-            tf2-geometry-msgs  # tf2 msg conversions
-            slam-toolbox              # lidar SLAM, fixes yaw drift
-            robot-localization        # EKF fusion node (optional but useful)
-            # --- Added Missing Dependencies ---
-            robot-state-publisher
-            imu-tools
-            joint-state-publisher   # Headless version avoids PyQt5 conflict
-            ament-lint-auto
-            ament-lint-common
-            rko-lio
-            # --- CLI Debugging Tools ---
-            # (rqt suite removed temporarily due to pyqt5/Python 3.13 patch conflicts)
-            ros2bag               # Command line tool for recording/playing data
-            rosbag2-storage-default-plugins # SQLite3 storage backend for rosbag
-            tf2-tools             # CLI tools like tf2_echo and tf2_monitor
-          ];
-        };
-        python = pkgs.python3.withPackages (ps: [ ps.numpy ]);
-      in {
+
+        # Switch to "rolling" or "humble" here if you prefer another distro.
+        ros = pkgs.rosPackages.jazzy;
+
+        packages = [
+          pkgs.colcon
+          pkgs.git
+          pkgs.usbutils # lsusb, for identifying your serial adapters
+          pkgs.fish
+        ]
+        ++ (with pkgs.python3Packages; [
+          pyserial   # talks to the SC15 servo bus
+          numpy      # scan -> point cloud math
+          setuptools
+          wheel
+        ])
+        ++ (with ros; [
+          ros-base           # rclcpp/rclpy, ros2cli, common msgs
+          rclpy
+          sensor-msgs
+          std-msgs
+          geometry-msgs
+          tf2-ros
+          launch
+          launch-ros
+          rviz2              # visualize the assembled 3D cloud
+          slam-toolbox       # optional: 2D mapping from the same scans
+          rplidar-ros
+        ]);
+
+        welcome = ''
+          echo "ROS 2 (jazzy) rocking-lidar dev shell ready."
+          echo "First run:  git clone --recurse-submodules https://github.com/Slamtec/sllidar_ros2 src/sllidar_ros2"
+          echo "Then:       colcon build --symlink-install"
+          echo "Run:        ros2 launch seesaw seesaw.launch.py"
+        '';
+      in
+      {
+        # Default shell: drops you into fish, with the full ROS 2 environment
+        # (PATH, PYTHONPATH, AMENT_PREFIX_PATH, ...) inherited from the shellHook.
         devShells.default = pkgs.mkShell {
-          name = "seesaw-ros2";
-          packages = [
-            pkgs.colcon
-            pkgs.pkg-config
-            pkgs.cmake
-            pkgs.gcc
-            pkgs.gnumake
-            pkgs.eigen    # Eigen3 headers
-            pkgs.qt5.qtbase # RViz Qt deps
-            python
-            rosEnv
-          ];
-          shellHook = ''
-            # Source properly first
-            source ${rosEnv}/setup.sh 2>/dev/null || \
-            source ${rosEnv}/share/${rosEnv.name}/local_setup.sh 2>/dev/null || true
-
-            # Explicitly propagate AMENT paths into CMAKE so find_package works
-            export CMAKE_PREFIX_PATH="${rosEnv}:$CMAKE_PREFIX_PATH"
-            export AMENT_PREFIX_PATH="${rosEnv}:$AMENT_PREFIX_PATH"
-
-            # Needed for ament_cmake_core specifically
-            export CMAKE_MODULE_PATH="${rosEnv}/share/ament_cmake_core/cmake:$CMAKE_MODULE_PATH"
-            export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-            export CYCLONEDDS_URI='<CycloneDDS><Domain><General><Interfaces><NetworkInterface name="lo" priority="default"/></Interfaces></General></Domain></CycloneDDS>'
-            export QT_QPA_PLATFORM=xcb
-            export QT_QPA_PLATFORM_PLUGIN_PATH=${pkgs.qt5.qtbase}/lib/qt-*/plugins/platforms
-            export LD_LIBRARY_PATH=${pkgs.qt5.qtbase}/lib:${pkgs.eigen}/lib:${rosEnv}/lib:$LD_LIBRARY_PATH
-            unset QTDIR QT_PLUGIN_PATH QT5DIR
-            export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
-            alias cb="colcon build --packages-select seesaw_ros2"
-            alias ci="colcon build --packages-up-to seesaw_ros2 --symlink-install"
-            alias test="ros2 run seesaw_ros2 udp_reader & sleep 2 && rviz2"
-            echo "=== Seesaw ROS2 C++ Ready ==="
-          '';
+          name = "rocking-lidar";
+          inherit packages;
         };
       });
+
+  # Binary cache for ROS packages so you don't compile all of ROS from source.
+  nixConfig = {
+    extra-substituters = [ "https://ros.cachix.org" ];
+    extra-trusted-public-keys = [ "ros.cachix.org-1:dSyZxI8geDCJrwgvCOHDoAfOm5sV1wCPjBkKL+38Rvo=" ];
+  };
 }

@@ -1,0 +1,32 @@
+# Rocking-lidar parameters.
+# The SC15 typically shows up as the *second* USB-serial adapter when the
+# RPLidar is plugged in first, but pin both devices with /dev/serial/by-id/*
+# paths for reliability, e.g.:
+#   port: /dev/serial/by-id/usb-Silicon_Labs_CP2102_...-if00-port0
+#   (list yours with: ls -l /dev/serial/by-id/)
+
+/**:
+  sc15_driver:
+    ros__parameters:
+      port: /dev/ttyACM1
+      baud_rate: 1000000        # SC/ST series default; try 115200 if you changed it
+      servo_id: 1
+      center_pos: 2048          # counts at 0 deg tilt (0..4095 spans 360 deg)
+      counts_per_rev: 4096
+      min_angle_deg: -30.0      # lower tilt limit of the rock
+      max_angle_deg: 30.0       # upper tilt limit of the rock
+      sweep_period: 8.0         # seconds per full out-and-back cycle
+      profile: sine             # "sine" (smooth) or "triangle"
+      speed: 1500               # steps/s
+      acceleration: 50
+      control_rate: 50.0        # Hz
+      readback: true            # use measured servo position for TF (more accurate)
+      parent_frame: lidar_mount
+      child_frame: laser
+
+  scan_to_cloud:
+    ros__parameters:
+      scan_topic: /scan
+      tilt_topic: /sc15/tilt
+      output_topic: /seesaw/points
+      output_frame: lidar_mount
